@@ -13,6 +13,11 @@ eggs/
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Environment and credentials
+.env
+.env.*
+*.token
+
 # IDEs
 .vscode/
 .idea/
