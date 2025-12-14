@@ -330,7 +330,7 @@ python3 riverpod_3_scanner.py lib --pattern "**/*_notifier.dart"
 - Flutter Community - For real-world crash reports
 - Production deployment teams - For validation
 
-**Maintainer**: Riverpod Community
+**Maintainer**: DayLight Creative Technologies
 **Support**: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/issues
 
 ---
