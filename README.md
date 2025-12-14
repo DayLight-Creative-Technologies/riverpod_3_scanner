@@ -2,6 +2,8 @@
 
 **Comprehensive static analysis tool for detecting Riverpod 3.0 async safety violations in Flutter/Dart projects.**
 
+[![PyPI version](https://img.shields.io/pypi/v/riverpod-3-scanner.svg)](https://pypi.org/project/riverpod-3-scanner/)
+[![Python versions](https://img.shields.io/pypi/pyversions/riverpod-3-scanner.svg)](https://pypi.org/project/riverpod-3-scanner/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Riverpod](https://img.shields.io/badge/Riverpod-3.0+-green.svg)](https://riverpod.dev)
 [![Flutter](https://img.shields.io/badge/Flutter-3.0+-blue.svg)](https://flutter.dev)

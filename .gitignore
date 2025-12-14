@@ -7,6 +7,11 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+eggs/
+.eggs/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
 
 # IDEs
 .vscode/

@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "riverpod-3-scanner"
+version = "1.0.0"
+description = "Comprehensive static analysis tool for detecting Riverpod 3.0 async safety violations in Flutter/Dart projects"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Steven Day", email = "support@daylightcreative.tech"}
+]
+maintainers = [
+    {name = "Steven Day", email = "support@daylightcreative.tech"}
+]
+keywords = [
+    "riverpod",
+    "flutter",
+    "dart",
+    "static-analysis",
+    "linter",
+    "code-quality",
+    "async-safety",
+    "riverpod-3",
+    "safety-checker"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+]
+requires-python = ">=3.7"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner"
+Documentation = "https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md"
+Repository = "https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner"
+Issues = "https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/issues"
+Changelog = "https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/CHANGELOG.md"
+
+[project.scripts]
+riverpod-3-scanner = "riverpod_3_scanner.scanner:main"
+
+[tool.setuptools]
+packages = ["riverpod_3_scanner"]
+
+[tool.setuptools.package-data]
+riverpod_3_scanner = ["*.md"]

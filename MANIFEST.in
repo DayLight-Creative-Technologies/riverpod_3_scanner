@@ -1,0 +1,16 @@
+# Include documentation files
+include README.md
+include LICENSE
+include CHANGELOG.md
+include AUTHORS
+include CONTRIBUTORS.md
+include install.sh
+
+# Include docs directory
+recursive-include docs *.md
+
+# Exclude unnecessary files
+exclude .gitignore
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * .DS_Store
