@@ -5,6 +5,31 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2025-12-14
+
+### Fixed
+- **CRITICAL**: Fixed nested callback detection bug that missed violations in async callbacks
+  - Previous regex pattern `[^}]+` stopped at first closing brace, missing code in nested structures
+  - Now uses proper brace-counting algorithm to capture complete callback bodies
+  - Added detection for `await` statements INSIDE callbacks (not just before)
+  - Added common async callback parameter names: `requiresGameCompletion`, `requiresStart`, `requiresResume`
+  - **Production Impact**: Now correctly detects Sentry issue #7109530217 (UnmountedRefException in resetCompletionFlag)
+
+### Example of Previously Missed Pattern
+```dart
+requiresGameCompletion: (gameId, homeScore, awayScore) async {
+  final gameEntity = await gameNotifierFuture;
+  final completed = await gameCompletionService.handleGameCompletion(
+    onCompletion: () {
+      basketballNotifier.completeGame();
+    },  // ← Scanner previously stopped here
+  );
+  if (!completed) {
+    basketballNotifier.resetCompletionFlag();  // ← Now detected as violation
+  }
+}
+```
+
 ## [1.0.0] - 2025-12-14
 
 ### Added

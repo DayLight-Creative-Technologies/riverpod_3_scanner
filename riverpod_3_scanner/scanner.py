@@ -344,19 +344,24 @@ class RiverpodScanner:
         except Exception:
             return
 
-        # Pattern: parameterName: () { method(); }
-        # Also: parameterName: (args) { method(); }
-        callback_pattern = re.compile(r'(\w+):\s*\([^)]*\)\s*\{([^}]+)\}', re.DOTALL)
+        # Pattern: parameterName: (args) {
+        # NOTE: Use brace counting to handle nested callbacks properly
+        callback_start_pattern = re.compile(r'(\w+):\s*\([^)]*\)\s*(?:async\s*)?\{', re.DOTALL)
 
-        for callback_match in callback_pattern.finditer(class_content):
+        for callback_match in callback_start_pattern.finditer(class_content):
             param_name = callback_match.group(1)
-            callback_body = callback_match.group(2)
+
+            # Find the matching closing brace using brace counting
+            brace_start = callback_match.end() - 1  # Position of opening {
+            callback_end = self._find_method_end(class_content, callback_match.end())
+            callback_body = class_content[callback_match.end():callback_end]
 
             # Common async callback parameters
             async_callback_params = {
                 'onCompletion', 'onComplete', 'onSuccess', 'onFailure', 'onError',
                 'builder', 'onPressed', 'onTap', 'onLongPress', 'onChanged',
-                'onSubmitted', 'onFieldSubmitted', 'onSaved', 'listener'
+                'onSubmitted', 'onFieldSubmitted', 'onSaved', 'listener',
+                'requiresGameCompletion', 'requiresStart', 'requiresResume'
             }
 
             # Check if this callback is passed to an awaited method
@@ -367,7 +372,10 @@ class RiverpodScanner:
             # If 'await' appears within 200 chars before callback, this is async context
             has_await_before = bool(re.search(r'\bawait\s+\w+', before_callback))
 
-            if has_await_before or param_name in async_callback_params:
+            # Also check if callback contains await (callback is async)
+            has_await_inside = bool(re.search(r'\bawait\s+', callback_body))
+
+            if has_await_before or has_await_inside or param_name in async_callback_params:
                 # Find all method calls in callback body
                 method_call_pattern = re.compile(r'(?:^|[^\w])(\w+)\.(\w+)\(|(?:^|[^\w])(\w+)\(')
 
