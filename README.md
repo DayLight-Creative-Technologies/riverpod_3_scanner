@@ -346,6 +346,9 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## 🙏 Credits
 
+**Created by**: Steven Day, DayLight Creative Technologies
+
+**Acknowledgments**:
 - **Riverpod Team** - For `ref.mounted` feature and official pattern
 - **Andrea Bizzotto** - For educational content on AsyncNotifier safety
 - **Flutter Community** - For feedback and real-world crash reports
@@ -356,6 +359,8 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 - **Issues**: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/issues
 - **Discussions**: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/discussions
+- **Author**: Steven Day (steven@daylightcreative.tech)
+- **Company**: DayLight Creative Technologies
 - **Riverpod Discord**: https://discord.gg/riverpod
 
 ---
