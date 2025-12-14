@@ -5,7 +5,7 @@
 **Steven Day**
 - Role: Creator, Lead Developer, Maintainer
 - Company: DayLight Creative Technologies
-- Email: steven@daylightcreative.tech
+- Email: support@daylightcreative.tech
 - GitHub: [@DayLight-Creative-Technologies](https://github.com/DayLight-Creative-Technologies)
 
 ## Project History

@@ -1101,5 +1101,6 @@ python3 riverpod_3_scanner.py lib --pattern "**/*_notifier.dart"
 
 **Package**: `riverpod_3_scanner` v1.0.0
 **License**: MIT
-**Maintainer**: DayLight Creative Technologies
+**Author**: Steven Day
+**Company**: DayLight Creative Technologies
 **Support**: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/issues

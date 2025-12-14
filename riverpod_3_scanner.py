@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """
-Comprehensive Riverpod 3.0 Compliance Scanner
+Riverpod 3.0 Safety Scanner
+Comprehensive static analysis tool for Flutter/Dart projects using Riverpod 3.0+
+
+Author: Steven Day
+Company: DayLight Creative Technologies
+License: MIT
+Version: 1.0.0
 
 Detects ALL forbidden patterns that violate Riverpod 3.0 async safety standards.
 

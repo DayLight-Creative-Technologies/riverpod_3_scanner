@@ -324,13 +324,16 @@ python3 riverpod_3_scanner.py lib --pattern "**/*_notifier.dart"
 
 **License**: MIT License (see LICENSE file)
 
+**Author**: Steven Day
+**Company**: DayLight Creative Technologies
+**Contact**: support@daylightcreative.tech
+
 **Credits**:
 - Riverpod Team - For ref.mounted feature
 - Andrea Bizzotto - For AsyncNotifier safety patterns
 - Flutter Community - For real-world crash reports
 - Production deployment teams - For validation
 
-**Maintainer**: DayLight Creative Technologies
 **Support**: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/issues
 
 ---

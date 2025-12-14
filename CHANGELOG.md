@@ -135,7 +135,8 @@ python3 riverpod_3_scanner.py lib
 
 - **Report Issues**: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/issues
 - **Feature Requests**: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/discussions
-- **Security Issues**: security@DayLight-Creative-Technologies.com
+- **Author**: Steven Day (support@daylightcreative.tech)
+- **Security Issues**: support@daylightcreative.tech
 
 ---
 
