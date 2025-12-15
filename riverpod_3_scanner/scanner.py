@@ -1114,8 +1114,16 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
                 if re.search(r':\s*\([^)]*\)\s*\{', await_statement) or re.search(r':\s*\(\)\s*\{', await_statement):
                     continue
 
-                # Get next 15 lines after await to find mounted check (increased from 5)
-                remaining_lines = method_lines[await_line_num + 1:await_line_num + 16]
+                # Skip if this is a "return await" statement - no code executes after
+                # Example: return await _signInWithAppleIOS();
+                # The method returns immediately, so mounted check would never execute
+                current_line = method_lines[await_line_num] if await_line_num < len(method_lines) else ''
+                if re.search(r'\breturn\s+await\s+', current_line):
+                    continue
+
+                # Get next 25 lines after await to find mounted check (increased from 15)
+                # Some methods have long function call chains that span many lines
+                remaining_lines = method_lines[await_line_num + 1:await_line_num + 26]
                 next_lines = '\n'.join(remaining_lines)
 
                 # Check if mounted appears in next lines (use appropriate pattern for class type)
@@ -2848,16 +2856,20 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
         """
         Check if there's significant code after an await that requires a mounted check.
 
-        Returns True if there's ANY of:
-        - return statement with a value (not just 'return;')
+        Returns True ONLY if there's:
         - ref operations (ref.read/watch/listen/invalidate)
         - state assignments or access (state = or state.)
-        - method calls (could indirectly use ref)
 
-        Returns False if only:
+        Returns False for:
         - closing braces
         - whitespace/comments
         - void return (just 'return;')
+        - return with value (safe - no ref access)
+        - method calls on the await result (safe - no ref access)
+        - conditional checks on await result (safe - no ref access)
+
+        The key insight: We only need mounted check if ref or state is accessed AFTER the await.
+        Simply using the await's result value does not require a mounted check.
         """
         # Strip whitespace and check if empty
         stripped = next_lines.strip()
@@ -2868,10 +2880,6 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
         if re.match(r'^}+\s*$', stripped):
             return False
 
-        # Check for return with value (not just 'return;')
-        if re.search(r'return\s+[^;]', next_lines):
-            return True
-
         # Check for ref operations (read, watch, listen, invalidate)
         if re.search(r'ref\.(read|watch|listen|invalidate)', next_lines):
             return True
@@ -2880,11 +2888,7 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
         if re.search(r'\bstate\s*[.=]', next_lines):
             return True
 
-        # Check for method calls
-        # This catches any method that might use ref internally
-        if re.search(r'\w+\([^)]*\)', next_lines):
-            return True
-
+        # No ref/state access found - safe
         return False
 
     def _get_field_caching_fix(self, field_name: str, async_methods: List[str]) -> str:

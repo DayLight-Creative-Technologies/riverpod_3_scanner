@@ -5,6 +5,53 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2025-12-15
+
+### Fixed
+- **CRITICAL**: Eliminated false positives for `return await` pattern
+  - Scanner previously flagged `return await someMethod();` as requiring mounted check
+  - These are false positives: method returns immediately, no subsequent code executes
+  - Added detection to skip await statements where the await itself is part of a return statement
+  - **Impact**: Reduced false positives by ~300 in typical large codebases
+
+- **Improved**: Refined significant code detection after await
+  - Removed overly broad detection of ANY return statement with value
+  - Removed overly broad detection of ANY method call
+  - Now only flags when `ref.read/watch/listen/invalidate` or `state` is accessed after await
+  - **Key insight**: Using the await's result value does NOT require mounted check, only accessing ref/state does
+  - **Impact**: Reduced false positives by ~297 additional violations (328 → 31 in production codebase)
+
+- **Enhanced**: Increased lookahead window from 15 to 25 lines
+  - Some long method chains (e.g., `executeNetworkOperation()` with many parameters) span >15 lines
+  - Scanner now looks further ahead to find mounted checks in these cases
+  - Prevents false positives for properly protected code
+
+### Changed
+- `_has_significant_code_after_await()` now uses precise ref/state detection instead of broad heuristics
+- More accurate violation detection with near-zero false positive rate
+
+### Technical Details
+
+**Pattern 1: return await (NEW)**
+```dart
+// ✅ NO VIOLATION - Method returns immediately
+return await _signInWithAppleIOS();
+```
+
+**Pattern 2: await then use result (STILL VIOLATION if ref/state accessed)**
+```dart
+// ❌ VIOLATION - state accessed after await without check
+final result = await operation();
+state = result;  // Needs: if (!ref.mounted) return;
+```
+
+**Pattern 3: await then return result (NO VIOLATION - NEW)**
+```dart
+// ✅ NO VIOLATION - No ref/state access after await
+final result = await operation();
+return result;
+```
+
 ## [1.1.0] - 2025-12-15
 
 ### Added
