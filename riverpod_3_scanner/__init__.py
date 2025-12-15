@@ -9,7 +9,7 @@ License: MIT
 
 from .scanner import RiverpodScanner, ViolationType, Violation
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 __author__ = "Steven Day"
 __email__ = "support@daylightcreative.tech"
 __license__ = "MIT"
