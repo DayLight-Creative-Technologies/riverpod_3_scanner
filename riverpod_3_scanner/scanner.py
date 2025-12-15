@@ -6,7 +6,7 @@ Comprehensive static analysis tool for Flutter/Dart projects using Riverpod 3.0+
 Author: Steven Day
 Company: DayLight Creative Technologies
 License: MIT
-Version: 1.0.2
+Version: 1.1.0
 
 Detects ALL forbidden patterns that violate Riverpod 3.0 async safety standards.
 
@@ -1121,12 +1121,11 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
                 # Check if mounted appears in next lines (use appropriate pattern for class type)
                 has_mounted_after = re.search(mounted_pattern, next_lines)
 
-                # Only check for ref usage at the method's top level, not in nested blocks
-                # Look for ref usage that's not inside braces/callbacks
-                ref_usage_pattern = re.compile(r'^\s*(final\s+\w+\s*=\s*)?ref\.(read|watch|listen|invalidate)', re.MULTILINE)
-                has_ref_usage = ref_usage_pattern.search(next_lines)
+                # Check if there's significant code after await that requires mounted check
+                # This includes: return with value, ref operations, state assignments, method calls
+                has_significant_code = self._has_significant_code_after_await(next_lines)
 
-                if has_ref_usage and not has_mounted_after:
+                if has_significant_code and not has_mounted_after:
                     abs_line = full_content[:class_start + method_start + await_match.start()].count('\n') + 1
                     snippet_start = max(0, abs_line - 1)
                     snippet_end = min(len(lines), abs_line + 5)
@@ -2844,6 +2843,49 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
                 if brace_count == 0:
                     return i
         return len(content)
+
+    def _has_significant_code_after_await(self, next_lines: str) -> bool:
+        """
+        Check if there's significant code after an await that requires a mounted check.
+
+        Returns True if there's ANY of:
+        - return statement with a value (not just 'return;')
+        - ref operations (ref.read/watch/listen/invalidate)
+        - state assignments or access (state = or state.)
+        - method calls (could indirectly use ref)
+
+        Returns False if only:
+        - closing braces
+        - whitespace/comments
+        - void return (just 'return;')
+        """
+        # Strip whitespace and check if empty
+        stripped = next_lines.strip()
+        if not stripped:
+            return False
+
+        # Only closing braces
+        if re.match(r'^}+\s*$', stripped):
+            return False
+
+        # Check for return with value (not just 'return;')
+        if re.search(r'return\s+[^;]', next_lines):
+            return True
+
+        # Check for ref operations (read, watch, listen, invalidate)
+        if re.search(r'ref\.(read|watch|listen|invalidate)', next_lines):
+            return True
+
+        # Check for state assignment or access
+        if re.search(r'\bstate\s*[.=]', next_lines):
+            return True
+
+        # Check for method calls
+        # This catches any method that might use ref internally
+        if re.search(r'\w+\([^)]*\)', next_lines):
+            return True
+
+        return False
 
     def _get_field_caching_fix(self, field_name: str, async_methods: List[str]) -> str:
         """Get fix instructions for field caching violation"""
