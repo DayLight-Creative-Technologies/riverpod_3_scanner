@@ -5,6 +5,45 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2025-12-14
+
+### Fixed
+- **CRITICAL**: Extended ref operation detection to include `ref.watch()` and `ref.listen()`
+  - Violation Type #4 previously only checked for `ref.read()` before mounted check
+  - Now detects ALL ref operations: `ref.read()`, `ref.watch()`, `ref.listen()`
+  - **Production Impact**: Now correctly detects UnmountedRefException from `ref.watch()` in async methods
+
+- **CRITICAL**: Added FutureOr<T> detection for Riverpod build() methods
+  - Scanner previously only detected `Future<T>` and `Stream<T>` async methods
+  - Riverpod's `@override FutureOr<State> build()` methods were missed
+  - Now detects async methods with `FutureOr<T>` return type
+  - Applied to all async method detection patterns across codebase
+
+- **Fixed comment false positives** in ref operation detection
+  - Added `_remove_comments()` call before checking for ref operations
+  - Prevents matching ref operations in comments (e.g., `// Cannot use ref.listen()`)
+  - Ensures accurate operation name reporting (watch vs listen vs read)
+
+### Changed
+- Updated violation Type #4 description from "ref.read() before mounted check" to "ref operation (read/watch/listen) before mounted check"
+- Enhanced fix instructions to cover all three ref operations
+- Improved error messages to show actual operation used (e.g., "ref.watch() before mounted check")
+
+### Example of Previously Missed Pattern
+```dart
+@override
+FutureOr<AvatarsState> build(List<String> uuIds) async {
+  // ... early return logic ...
+
+  for (final uuid in uuIds) {
+    ref.watch(avatarProvider(uuid));  // ← Now detected as violation
+  }
+
+  await initialize();
+  return state.value ?? const AvatarsState.initial();
+}
+```
+
 ## [1.0.1] - 2025-12-14
 
 ### Fixed
@@ -134,6 +173,8 @@ requiresGameCompletion: (gameId, homeScore, awayScore) async {
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.0.2 | 2025-12-14 | FutureOr detection, ref.watch/listen detection, comment stripping |
+| 1.0.1 | 2025-12-14 | Nested callback detection fix |
 | 1.0.0 | 2025-12-14 | Full call-graph analysis, zero false positives |
 | 0.9.0 | 2025-11-23 | mounted vs ref.mounted distinction |
 | 0.1.0 | 2025-11-15 | Initial implementation |
@@ -165,6 +206,8 @@ python3 riverpod_3_scanner.py lib
 
 ---
 
+[1.0.2]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.0.2
+[1.0.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.0.1
 [1.0.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.0.0
 [0.9.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v0.9.0
 [0.1.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v0.1.0

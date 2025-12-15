@@ -6,7 +6,7 @@ Comprehensive static analysis tool for Flutter/Dart projects using Riverpod 3.0+
 Author: Steven Day
 Company: DayLight Creative Technologies
 License: MIT
-Version: 1.0.0
+Version: 1.0.2
 
 Detects ALL forbidden patterns that violate Riverpod 3.0 async safety standards.
 
@@ -20,7 +20,7 @@ CRITICAL (Will crash in production):
 1. Field caching (nullable/dynamic fields with getters in async classes)
 2. Lazy getters (get x => ref.read()) in async classes
 3. Async getters with field caching
-4. ref.read() before ref.mounted check
+4. ref operation (read/watch/listen) before ref.mounted check
 5. Missing ref.mounted after await
 6. Missing ref.mounted in catch blocks
 7. Nullable field direct access (_field?.method()) when getter exists
@@ -288,8 +288,8 @@ class RiverpodScanner:
         except Exception:
             return
 
-        # Find all async methods
-        async_pattern = re.compile(r'(?:Future<[^>]+>|Stream<[^>]+>)\s+(\w+)\s*\([^)]*\)\s*async\s*\{', re.DOTALL)
+        # Find all async methods (including FutureOr for Riverpod build methods)
+        async_pattern = re.compile(r'(?:Future<[^>]+>|FutureOr<[^>]+>|Stream<[^>]+>)\s+(\w+)\s*\([^)]*\)\s*async\s*\{', re.DOTALL)
 
         for async_match in async_pattern.finditer(class_content):
             method_name = async_match.group(1)
@@ -713,11 +713,15 @@ class RiverpodScanner:
         # Use lazy quantifier and lookbehind to ensure we capture the right closing paren
         async_future_pattern = re.compile(r'Future<[^>]+>\s+(\w+)\s*\(.*?\)\s+async(?:\s|{)', re.DOTALL)
 
-        # Pattern 2: Stream<T> methodName(...) async*
+        # Pattern 2: FutureOr<T> methodName(...) async (used by Riverpod build methods)
+        async_futureor_pattern = re.compile(r'FutureOr<[^>]+>\s+(\w+)\s*\(.*?\)\s+async(?:\s|{)', re.DOTALL)
+
+        # Pattern 3: Stream<T> methodName(...) async*
         async_stream_pattern = re.compile(r'Stream<[^>]+>\s+(\w+)\s*\(.*?\)\s+async\*(?:\s|{)', re.DOTALL)
 
         methods = []
         methods.extend([match.group(1) for match in async_future_pattern.finditer(class_content)])
+        methods.extend([match.group(1) for match in async_futureor_pattern.finditer(class_content)])
         methods.extend([match.group(1) for match in async_stream_pattern.finditer(class_content)])
         return methods
 
@@ -1050,9 +1054,9 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
             mounted_pattern = r'if\s*\(\s*!ref\.mounted\s*\)'
 
         for method_name in async_methods:
-            # Find the method
+            # Find the method (Future, FutureOr, or Stream)
             method_pattern = re.compile(
-                rf'Future<[^>]+>\s+{method_name}\s*\([^)]*\)\s+async\s*\{{',
+                rf'(?:Future<[^>]+>|FutureOr<[^>]+>|Stream<[^>]+>)\s+{method_name}\s*\([^)]*\)\s+async\*?\s*\{{',
                 re.DOTALL
             )
             method_match = method_pattern.search(class_content)
@@ -1065,13 +1069,18 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
             method_body = class_content[method_start:method_end]
             method_lines = method_body.split('\n')
 
-            # VIOLATION 4: ref.read() before mounted check
+            # VIOLATION 4: ref operation (read/watch/listen) before mounted check
             first_10_lines = '\n'.join(method_lines[:10])
+            # Strip comments to avoid false positives from comments containing ref operations
+            first_10_lines_no_comments = self._remove_comments(first_10_lines)
 
-            has_early_mounted = re.search(mounted_pattern, first_10_lines)
-            ref_read_match = re.search(r'ref\.read\(', first_10_lines)
+            has_early_mounted = re.search(mounted_pattern, first_10_lines_no_comments)
+            # Check for ANY ref operation: ref.read(), ref.watch(), or ref.listen()
+            ref_operation_match = re.search(r'ref\.(read|watch|listen)\(', first_10_lines_no_comments)
 
-            if ref_read_match and not has_early_mounted:
+            if ref_operation_match and not has_early_mounted:
+                # Determine which operation was used
+                operation_name = ref_operation_match.group(1)
                 abs_line = full_content[:class_start + method_start].count('\n') + 2
                 snippet_start = max(0, abs_line - 1)
                 snippet_end = min(len(lines), abs_line + 5)
@@ -1082,7 +1091,7 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
                     class_name=class_name,
                     violation_type=ViolationType.REF_READ_BEFORE_MOUNTED,
                     line_number=abs_line,
-                    context=f"Method {method_name}(): ref.read() before mounted check",
+                    context=f"Method {method_name}(): ref.{operation_name}() before mounted check",
                     code_snippet=snippet,
                     fix_instructions=self._get_ref_read_before_mounted_fix()
                 ))
@@ -2269,9 +2278,9 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
         violations = []
 
         for method_name in async_methods:
-            # Find the async method
+            # Find the async method (Future, FutureOr, or Stream)
             method_pattern = re.compile(
-                rf'Future<[^>]+>\s+{method_name}\s*\([^)]*\)\s+async\s*\{{',
+                rf'(?:Future<[^>]+>|FutureOr<[^>]+>|Stream<[^>]+>)\s+{method_name}\s*\([^)]*\)\s+async\*?\s*\{{',
                 re.DOTALL
             )
             method_match = method_pattern.search(class_content)
@@ -2741,8 +2750,8 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
         """Find all method names in a class that use ref.read/watch/listen"""
         methods_with_ref = set()
 
-        # Find all method definitions
-        method_pattern = re.compile(r'(?:Future<[^>]+>|void|[A-Z]\w+)\s+(\w+)\s*\([^)]*\)\s*(?:async\s*)?\{')
+        # Find all method definitions (including FutureOr for Riverpod build methods)
+        method_pattern = re.compile(r'(?:Future<[^>]+>|FutureOr<[^>]+>|void|[A-Z]\w+)\s+(\w+)\s*\([^)]*\)\s*(?:async\s*)?\{')
 
         for method_match in method_pattern.finditer(class_content):
             method_name = method_match.group(1)
@@ -2864,10 +2873,14 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
    if (!ref.mounted) return;"""
 
     def _get_ref_read_before_mounted_fix(self) -> str:
-        """Get fix instructions for ref.read before mounted check"""
-        return """Add at method entry:
+        """Get fix instructions for ref operation (read/watch/listen) before mounted check"""
+        return """Add at method entry BEFORE any ref operation (read/watch/listen):
    if (!ref.mounted) return;
-   final dep = ref.read(provider);"""
+   final dep = ref.read(provider);
+   // OR
+   ref.watch(someProvider);
+   // OR
+   ref.listen(someProvider, (prev, next) { ... });"""
 
     def _get_missing_mounted_after_await_fix(self) -> str:
         """Get fix instructions for missing mounted after await"""
