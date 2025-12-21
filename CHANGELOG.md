@@ -5,6 +5,82 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2025-12-21
+
+### Added
+- **CRITICAL**: Comprehensive field caching detection for ALL patterns
+  - Simple arrow getters: `Type? get field => _field;`
+  - Enhanced getters with StateError: `Type get field { final f = _field; if (f == null) throw...; return f; }`
+  - Lazy initialization getters: `Type get field { _field ??= value; return _field!; }`
+  - **Dynamic field support**: `dynamic _field;` with any getter type (critical for type safety)
+  - **Generic field types**: `Map<K,V>? _field;`, `Either<A,List<B>>? _field;` with nested angle brackets
+  - Multiple fields in single class (e.g., `app_lifecycle_notifier.dart` with 5+ cached fields)
+
+- **CRITICAL**: Nested generic type support in async method detection
+  - Changed pattern from `Future<[^>]+>` to `Future<.+?>` for non-greedy nested match
+  - Now correctly detects: `Future<Either<Failure, List<Map<String, dynamic>>>>`
+  - Applies to Future, FutureOr, and Stream return types
+  - **Impact**: Previously missed async methods in datasources with complex Either return types
+
+- **Fix instructions now context-aware**
+  - Correctly shows `if (!mounted)` for ConsumerStatefulWidget State classes
+  - Correctly shows `if (!ref.mounted)` for Riverpod provider classes
+  - Passes `is_consumer_state` flag through field caching detection chain
+
+### Fixed
+- **Regex escaping for generic field types**
+  - Field types like `Map<String, List<int>>` contain regex special characters
+  - Now uses `re.escape(field_type)` before pattern construction
+  - Prevents regex compilation errors on complex generic types
+
+- **Line number tracking for all field patterns**
+  - Previously could reference wrong match in loop
+  - Now tracks line numbers per field during collection phase
+  - Accurate violation reporting for all field types
+
+### Changed
+- Field detection now uses unified collection approach:
+  1. Collect all nullable typed fields: `(\w+(?:<.+?>)?)\?\s+(_\w+);`
+  2. Collect all dynamic fields: `\bdynamic\s+(_\w+);`
+  3. Process all collected fields with correct line numbers
+  - Ensures consistent detection across all field types
+
+### Validation
+- Created comprehensive test suite with 9 field caching patterns
+- Verified 100% detection rate: 9/9 violations caught
+- Created validation suite with 6 CORRECT patterns
+- Verified zero false positives: 0/6 flagged incorrectly
+- Production testing: Successfully detects violations in:
+  - `chat_remote_datasource.dart` (2 violations)
+  - `baseball_notifier.dart` (1 violation with 19 async methods)
+  - `app_lifecycle_notifier.dart` (multiple cached fields)
+  - Full codebase scan: 34 violations in 16 files
+
+### Technical Details
+
+**New Field Pattern Coverage:**
+```dart
+// ALL NOW DETECTED:
+String? _field1;                        // Simple nullable
+Map<String, dynamic>? _field2;          // Generic
+Either<A, List<B>>? _field3;           // Nested generic
+dynamic _field4;                        // Dynamic (no ?)
+
+// ALL getters detected:
+Type? get field => _field;              // Arrow syntax
+Type get field { if (_field == null)... } // Enhanced
+Type get field { _field ??= ...; }      // Lazy init
+```
+
+**Async Method Detection Enhanced:**
+```dart
+// ALL NOW DETECTED:
+Future<String> method1() async { }              // Simple
+Future<Either<F, S>> method2() async { }        // Generic
+Future<Either<F, List<Map<K,V>>>> method3() async { } // Nested
+Future<Map<String, List<int>>> method4() async { }    // Complex
+```
+
 ## [1.1.1] - 2025-12-15
 
 ### Fixed

@@ -15,7 +15,7 @@ long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists
 
 setup(
     name="riverpod-3-scanner",
-    version="1.1.1",
+    version="1.2.0",
     author="Steven Day",
     author_email="support@daylightcreative.tech",
     description="Comprehensive static analysis tool for detecting Riverpod 3.0 async safety violations in Flutter/Dart projects",

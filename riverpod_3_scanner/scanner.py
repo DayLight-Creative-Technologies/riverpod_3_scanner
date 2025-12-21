@@ -6,7 +6,7 @@ Comprehensive static analysis tool for Flutter/Dart projects using Riverpod 3.0+
 Author: Steven Day
 Company: DayLight Creative Technologies
 License: MIT
-Version: 1.1.0
+Version: 1.2.0
 
 Detects ALL forbidden patterns that violate Riverpod 3.0 async safety standards.
 
@@ -630,7 +630,7 @@ class RiverpodScanner:
             # VIOLATION 1-3: Field caching patterns
             violations.extend(self._check_field_caching(
                 file_path, class_name, class_content, content, class_start,
-                lines, has_async_methods, async_methods
+                lines, has_async_methods, async_methods, is_consumer_state=True
             ))
 
             # VIOLATION 4-6: Async method ref safety
@@ -710,14 +710,15 @@ class RiverpodScanner:
         # This avoids issues with nested () in parameter lists
 
         # Pattern 1: Future<T> methodName(...) async
-        # Use lazy quantifier and lookbehind to ensure we capture the right closing paren
-        async_future_pattern = re.compile(r'Future<[^>]+>\s+(\w+)\s*\(.*?\)\s+async(?:\s|{)', re.DOTALL)
+        # UPDATED: Use .+? to handle nested generics like Future<Either<A, List<B>>>
+        # Non-greedy match continues until it finds "> methodName(...) async"
+        async_future_pattern = re.compile(r'Future<.+?>\s+(\w+)\s*\(.*?\)\s+async(?:\s|{)', re.DOTALL)
 
         # Pattern 2: FutureOr<T> methodName(...) async (used by Riverpod build methods)
-        async_futureor_pattern = re.compile(r'FutureOr<[^>]+>\s+(\w+)\s*\(.*?\)\s+async(?:\s|{)', re.DOTALL)
+        async_futureor_pattern = re.compile(r'FutureOr<.+?>\s+(\w+)\s*\(.*?\)\s+async(?:\s|{)', re.DOTALL)
 
         # Pattern 3: Stream<T> methodName(...) async*
-        async_stream_pattern = re.compile(r'Stream<[^>]+>\s+(\w+)\s*\(.*?\)\s+async\*(?:\s|{)', re.DOTALL)
+        async_stream_pattern = re.compile(r'Stream<.+?>\s+(\w+)\s*\(.*?\)\s+async\*(?:\s|{)', re.DOTALL)
 
         methods = []
         methods.extend([match.group(1) for match in async_future_pattern.finditer(class_content)])
@@ -802,7 +803,7 @@ class RiverpodScanner:
     def _check_field_caching(
         self, file_path: Path, class_name: str, class_content: str,
         full_content: str, class_start: int, lines: List[str],
-        has_async_methods: bool, async_methods: List[str]
+        has_async_methods: bool, async_methods: List[str], is_consumer_state: bool = False
     ) -> List[Violation]:
         """Check for all field caching patterns (VIOLATIONS 1-3)"""
         violations = []
@@ -953,31 +954,58 @@ Applies to all async methods: {', '.join(async_methods)}
 Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md"""
                     ))
 
-        # Find nullable fields: TypeName? _fieldName;
-        field_pattern = re.compile(r'(\w+)\?\s+(_\w+);')
+        # Find nullable fields: TypeName? _fieldName; OR dynamic _fieldName;
+        # Patterns support simple types (String?), generics (Map<K,V>?), and nested generics (Either<A, List<B>>?)
+        # Pattern 1: Generic nullable fields - Type<...>? _fieldName;
+        generic_field_pattern = re.compile(r'(\w+(?:<.+?>)?)\?\s+(_\w+);', re.DOTALL)
+        # Pattern 2: Dynamic fields - dynamic _fieldName; (implicitly nullable)
+        dynamic_field_pattern = re.compile(r'\bdynamic\s+(_\w+);')
 
-        for field_match in field_pattern.finditer(class_content):
-            field_type = field_match.group(1)
-            field_name = field_match.group(2)
+        # Collect all fields (nullable typed + dynamic) with line numbers
+        all_fields = []
+        for field_match in generic_field_pattern.finditer(class_content):
+            line_num = full_content[:class_start + field_match.start()].count('\n') + 1
+            all_fields.append((field_match.group(1), field_match.group(2), line_num))
+        for field_match in dynamic_field_pattern.finditer(class_content):
+            line_num = full_content[:class_start + field_match.start()].count('\n') + 1
+            all_fields.append(('dynamic', field_match.group(1), line_num))
+
+        for field_type, field_name, abs_field_line in all_fields:
             base_name = field_name[1:]  # Remove underscore
 
-            abs_field_line = full_content[:class_start + field_match.start()].count('\n') + 1
+            # Escape field_type for safe use in regex patterns (handles Map<K,V>, Either<A,List<B>>, etc.)
+            escaped_field_type = re.escape(field_type)
 
             # Check for ANY getter (sync or async) for this field
             # Pattern 1: Sync getter with field caching
-            sync_getter_patterns = [
-                # Enhanced getter with StateError
-                rf'{field_type}\s+get\s+{base_name}\s*\{{[^}}]*{field_name}[^}}]*StateError',
-                # Simple lazy getter
-                rf'{field_type}\s+get\s+{base_name}\s*\{{[^}}]*{field_name}\s*\?\?=',
-                # Arrow syntax
-                rf'{field_type}\s+get\s+{base_name}\s*=>\s*ref\.read\(',
-            ]
+            # Handle both typed fields (String?, int?) and dynamic fields
+            if field_type == 'dynamic':
+                # For dynamic fields, getter can be dynamic or any type
+                sync_getter_patterns = [
+                    # Enhanced getter with StateError (any return type)
+                    rf'\w+\s+get\s+{base_name}\s*\{{[^}}]*{field_name}[^}}]*StateError',
+                    # Simple lazy getter (any return type)
+                    rf'\w+\s+get\s+{base_name}\s*\{{[^}}]*{field_name}\s*\?\?=',
+                    # Arrow syntax with any return type
+                    rf'\w+\s+get\s+{base_name}\s*=>\s*{field_name}\s*;',
+                ]
+            else:
+                # For typed fields, match the specific type (nullable or non-nullable return)
+                sync_getter_patterns = [
+                    # Enhanced getter with StateError (nullable or non-nullable return type)
+                    rf'{escaped_field_type}\??\s+get\s+{base_name}\s*\{{[^}}]*{field_name}[^}}]*StateError',
+                    # Simple lazy getter
+                    rf'{escaped_field_type}\??\s+get\s+{base_name}\s*\{{[^}}]*{field_name}\s*\?\?=',
+                    # Arrow syntax with ref.read
+                    rf'{escaped_field_type}\??\s+get\s+{base_name}\s*=>\s*ref\.read\(',
+                    # Simple arrow getter returning cached field (CRITICAL: Field caching pattern)
+                    rf'{escaped_field_type}\?\s+get\s+{base_name}\s*=>\s*{field_name}\s*;',
+                ]
 
             # Pattern 2: Async getter with field caching
             async_getter_patterns = [
-                rf'Future<{field_type}>\s+get\s+{base_name}\s+async\s*\{{',
-                rf'Future<{field_type}>\s+get\s+{base_name}Future\s+async\s*\{{',
+                rf'Future<{escaped_field_type}>\s+get\s+{base_name}\s+async\s*\{{',
+                rf'Future<{escaped_field_type}>\s+get\s+{base_name}Future\s+async\s*\{{',
             ]
 
             # Check sync getters
@@ -999,7 +1027,7 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
                             line_number=abs_getter_line,
                             context=f"Field caching: {field_name} with getter in async class",
                             code_snippet=snippet,
-                            fix_instructions=self._get_field_caching_fix(field_name, async_methods)
+                            fix_instructions=self._get_field_caching_fix(field_name, async_methods, is_consumer_state)
                         ))
                     elif 'ref.read' in getter_match.group(0):
                         # Lazy getter pattern
@@ -2891,15 +2919,16 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
         # No ref/state access found - safe
         return False
 
-    def _get_field_caching_fix(self, field_name: str, async_methods: List[str]) -> str:
+    def _get_field_caching_fix(self, field_name: str, async_methods: List[str], is_consumer_state: bool = False) -> str:
         """Get fix instructions for field caching violation"""
         base_name = field_name[1:]
+        mounted_check = "if (!mounted) return;" if is_consumer_state else "if (!ref.mounted) return;"
         return f"""1. Remove: {field_name} field and getter
 2. In async methods ({', '.join(async_methods)}), use:
-   if (!ref.mounted) return;
+   {mounted_check}
    final {base_name} = ref.read(provider);
    await operation();
-   if (!ref.mounted) return;
+   {mounted_check}
    {base_name}.method();"""
 
     def _get_lazy_getter_fix(self, getter_name: str) -> str:
