@@ -57,6 +57,21 @@ chmod +x riverpod_3_scanner.py
 
 ### Basic Usage
 
+#### If installed via PyPI:
+
+```bash
+# Scan entire project
+riverpod-3-scanner lib
+
+# Scan specific file
+riverpod-3-scanner lib/features/game/notifiers/game_notifier.dart
+
+# Verbose output
+riverpod-3-scanner lib --verbose
+```
+
+#### If using direct download:
+
 ```bash
 # Scan entire project
 python3 riverpod_3_scanner.py lib
