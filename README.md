@@ -34,6 +34,19 @@ Riverpod 3.0 introduced `ref.mounted` to safely handle provider disposal during 
 
 ### Installation
 
+#### Via PyPI (Recommended)
+
+```bash
+pip install riverpod-3-scanner
+```
+
+Then run directly:
+```bash
+riverpod-3-scanner lib
+```
+
+#### Via Direct Download
+
 ```bash
 # Download scanner
 curl -O https://raw.githubusercontent.com/DayLight-Creative-Technologies/riverpod_3_scanner/main/riverpod_3_scanner.py
