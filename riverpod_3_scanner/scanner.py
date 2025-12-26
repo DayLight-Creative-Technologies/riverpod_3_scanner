@@ -954,14 +954,17 @@ Applies to all async methods: {', '.join(async_methods)}
 Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md"""
                     ))
 
-        # Find nullable fields: TypeName? _fieldName; OR dynamic _fieldName;
+        # Find nullable fields: TypeName? _fieldName; OR dynamic _fieldName; OR late final TypeName _fieldName;
         # Patterns support simple types (String?), generics (Map<K,V>?), and nested generics (Either<A, List<B>>?)
         # Pattern 1: Generic nullable fields - Type<...>? _fieldName;
         generic_field_pattern = re.compile(r'(\w+(?:<.+?>)?)\?\s+(_\w+);', re.DOTALL)
         # Pattern 2: Dynamic fields - dynamic _fieldName; (implicitly nullable)
         dynamic_field_pattern = re.compile(r'\bdynamic\s+(_\w+);')
+        # Pattern 3: Late final fields - late final TypeName _fieldName; OR late final TypeName? _fieldName;
+        # CRITICAL: late final creates lazy initialization which is FORBIDDEN in async classes
+        late_final_field_pattern = re.compile(r'late\s+final\s+(\w+(?:<.+?>)?)\??\s+(_\w+);', re.DOTALL)
 
-        # Collect all fields (nullable typed + dynamic) with line numbers
+        # Collect all fields (nullable typed + dynamic + late final) with line numbers
         all_fields = []
         for field_match in generic_field_pattern.finditer(class_content):
             line_num = full_content[:class_start + field_match.start()].count('\n') + 1
@@ -969,6 +972,9 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
         for field_match in dynamic_field_pattern.finditer(class_content):
             line_num = full_content[:class_start + field_match.start()].count('\n') + 1
             all_fields.append(('dynamic', field_match.group(1), line_num))
+        for field_match in late_final_field_pattern.finditer(class_content):
+            line_num = full_content[:class_start + field_match.start()].count('\n') + 1
+            all_fields.append((field_match.group(1), field_match.group(2), line_num))
 
         for field_type, field_name, abs_field_line in all_fields:
             base_name = field_name[1:]  # Remove underscore
@@ -999,7 +1005,8 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
                     # Arrow syntax with ref.read
                     rf'{escaped_field_type}\??\s+get\s+{base_name}\s*=>\s*ref\.read\(',
                     # Simple arrow getter returning cached field (CRITICAL: Field caching pattern)
-                    rf'{escaped_field_type}\?\s+get\s+{base_name}\s*=>\s*{field_name}\s*;',
+                    # Matches both nullable and non-nullable return types
+                    rf'{escaped_field_type}\??\s+get\s+{base_name}\s*=>\s*{field_name}\s*;',
                 ]
 
             # Pattern 2: Async getter with field caching

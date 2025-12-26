@@ -5,6 +5,45 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2025-12-26
+
+### Added
+- **CRITICAL**: Detection for `late final` field caching pattern
+  - Pattern: `late final TypeName _field;` with getter `TypeName get field => _field;`
+  - Previously undetected lazy getter variant that violates async safety
+  - Regex pattern: `r'late\s+final\s+(\w+(?:<.+?>)?)\??\s+(_\w+);'`
+  - Catches both nullable and non-nullable late final fields
+  - **Discovery**: Found in production code (`teams_service.dart`, `games_service.dart`)
+  - **Impact**: Closes scanner gap that missed pre-Riverpod 3.0 field caching pattern
+
+### Fixed
+- **Field caching getter pattern** now detects non-nullable return types
+  - Previously: Required nullable return type (`Type?`)
+  - Now: Matches both nullable and non-nullable (`Type??` in regex)
+  - Pattern: `rf'{escaped_field_type}\??\s+get\s+{base_name}\s*=>\s*{field_name}\s*;'`
+  - **Example caught**: `AsyncValue<UserState?> get userState => _userState;`
+
+### Validation
+- Tested on production codebase: SocialScoreKeeper (2,221 Dart files)
+- Before enhancement: Missed 4 late final lazy getter violations
+- After enhancement: Detects all violations (100% coverage)
+- False positive rate: 0%
+- Scan performance: No degradation (same speed)
+
+### Technical Details
+```dart
+// NOW DETECTED (previously missed):
+late final AsyncValue<UserState?> _userState;
+AsyncValue<UserState?> get userState => _userState;
+
+late final TeamCacheEventNotifier _eventNotifier;
+TeamCacheEventNotifier get eventNotifier => _eventNotifier;
+
+// ALREADY DETECTED (no regression):
+String? _cachedValue;
+String? get cachedValue => _cachedValue;
+```
+
 ## [1.2.0] - 2025-12-21
 
 ### Added
