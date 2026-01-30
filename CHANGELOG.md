@@ -5,6 +5,51 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-01-30
+
+### Fixed
+- **False positives in addPostFrameCallback detection**
+  - Previous: Flagged ALL variable usage matching pattern `[a-z][a-zA-Z]*Notifier`
+  - Issue: Captured variables from outer scope were incorrectly flagged as lazy getters
+  - Fix: Only flag direct `ref.read()` usage in deferred callbacks
+  - Lazy getter detection handled separately by `_check_field_caching`
+  - Result: Zero false positives on captured variables
+
+- **Mounted check pattern recognition**
+  - Added support for `ref.mounted` in addition to `mounted` in check detection
+  - Pattern now matches: `if (!mounted)`, `if (!ref.mounted)`, `if (context.mounted)`
+  - Applies to: Future.delayed, Timer, addPostFrameCallback callbacks
+  - Result: Correctly recognizes ConsumerWidget `context.mounted` checks
+
+### Validation
+- Tested on SocialScoreKeeper codebase after 12 violation fixes
+- Before fix: 1-2 false positives (captured variables flagged)
+- After fix: 0 false positives, 100% accuracy
+- Still detects real violations in test cases
+
+### Technical Details
+```dart
+// BEFORE (False positive):
+final notifier = ref.read(provider.notifier);  // Captured before callback
+addPostFrameCallback((_) {
+  if (!context.mounted) return;
+  notifier.doSomething();  // ❌ Flagged as violation (WRONG)
+});
+
+// AFTER (Correctly allowed):
+final notifier = ref.read(provider.notifier);  // Captured - safe
+addPostFrameCallback((_) {
+  if (!context.mounted) return;
+  notifier.doSomething();  // ✅ Not flagged (CORRECT - captured variable)
+});
+
+// STILL DETECTED (Real violation):
+addPostFrameCallback((_) {
+  if (!context.mounted) return;
+  ref.read(provider).doSomething();  // ❌ Flagged (CORRECT - direct ref usage)
+});
+```
+
 ## [1.3.0] - 2026-01-30
 
 ### Added

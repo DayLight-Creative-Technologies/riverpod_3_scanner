@@ -6,7 +6,7 @@ Comprehensive static analysis tool for Flutter/Dart projects using Riverpod 3.0+
 Author: Steven Day
 Company: DayLight Creative Technologies
 License: MIT
-Version: 1.3.0
+Version: 1.3.1
 
 Detects ALL forbidden patterns that violate Riverpod 3.0 async safety standards.
 
@@ -1942,8 +1942,8 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
             callback_end = self._find_callback_end(class_content, callback_start - 1)
             callback_content = class_content[callback_start:callback_end]
 
-            # Check if callback has mounted check
-            has_mounted_check = re.search(r'if\s*\(\s*!?mounted\s*\)', callback_content)
+            # Check if callback has mounted check (both 'mounted' and 'ref.mounted')
+            has_mounted_check = re.search(r'if\s*\(\s*!?\s*(ref\.)?\s*mounted\s*\)', callback_content)
 
             # Check if callback uses ref
             has_ref_usage = re.search(r'\bref\.(read|watch|listen)\(', callback_content)
@@ -1995,8 +1995,8 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
             callback_end = self._find_callback_end(class_content, callback_start - 1)
             callback_content = class_content[callback_start:callback_end]
 
-            # Check if callback has mounted check
-            has_mounted_check = re.search(r'if\s*\(\s*!?mounted\s*\)', callback_content)
+            # Check if callback has mounted check (both 'mounted' and 'ref.mounted')
+            has_mounted_check = re.search(r'if\s*\(\s*!?\s*(ref\.)?\s*mounted\s*\)', callback_content)
 
             # Check if callback uses ref
             has_ref_usage = re.search(r'\bref\.(read|watch|listen)\(', callback_content)
@@ -2055,17 +2055,15 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
             callback_end = self._find_callback_end(class_content, callback_start - 1)
             callback_content = class_content[callback_start:callback_end]
 
-            # Check if callback has mounted check
-            has_mounted_check = re.search(r'if\s*\(\s*!?mounted\s*\)', callback_content)
+            # Check if callback has mounted check (both 'mounted' and 'ref.mounted')
+            has_mounted_check = re.search(r'if\s*\(\s*!?\s*(ref\.)?\s*mounted\s*\)', callback_content)
 
             # Check if callback uses ref directly
             has_ref_usage = re.search(r'\bref\.(read|watch|listen)\(', callback_content)
 
-            # Check if callback uses lazy getters (methods that internally use ref.read)
-            # Common pattern: logger.logInfo, getter.method, etc.
-            has_getter_usage = re.search(r'\b(logger|[a-z][a-zA-Z]*Notifier|[a-z][a-zA-Z]*Service)\s*\.', callback_content)
-
-            if (has_ref_usage or has_getter_usage) and not has_mounted_check:
+            # Only flag if has direct ref usage (don't check for lazy getters here - too many false positives)
+            # Lazy getter detection is handled by _check_field_caching for class-level getters
+            if has_ref_usage and not has_mounted_check:
                 abs_line = full_content[:class_start + postframe_match.start()].count('\n') + 1
                 snippet_start = max(0, abs_line - 1)
                 snippet_end = min(len(lines), abs_line + 8)
@@ -2331,11 +2329,23 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
                     continue
 
                 # Now check if there's a mounted check before the ref usage
-                # Look for: if (!ref.mounted) return; or if (!mounted) return;
-                mounted_checks = list(re.finditer(
-                    r'if\s*\(\s*!\s*(ref\.)?mounted\s*\)\s*return',
-                    callback_content
-                ))
+                # Look for multiple patterns:
+                # 1. if (!ref.mounted) return;
+                # 2. if (!mounted) return;
+                # 3. if (context.mounted && ref.mounted) - positive check in compound condition
+                mounted_checks = []
+
+                # Pattern 1: Early return guards with negation
+                for m in re.finditer(r'if\s*\(\s*!\s*(ref\.)?mounted\s*\)\s*return', callback_content):
+                    mounted_checks.append(m)
+
+                # Pattern 2: Positive mounted checks in compound conditions
+                # Must be in an if statement with ref.mounted (not just any occurrence)
+                for m in re.finditer(r'if\s*\([^)]*\b(ref\.)?mounted\b[^)]*\)', callback_content):
+                    # Verify it actually contains ref.mounted or mounted check
+                    condition = m.group(0)
+                    if 'ref.mounted' in condition or ('mounted' in condition and 'ref' not in condition):
+                        mounted_checks.append(m)
 
                 # For each ref usage after await, verify there's a mounted check
                 for ref_usage in ref_usages:
