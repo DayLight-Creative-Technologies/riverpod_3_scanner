@@ -5,6 +5,61 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-01-30
+
+### Added
+- **CRITICAL**: ConsumerWidget async event handler detection
+  - Scanner now analyzes `ConsumerWidget` classes (extends ConsumerWidget)
+  - Detects async lambda functions in event handlers: onTap, onPressed, onLongPress, onChanged, onSubmitted, onSaved, onEditingComplete, onFieldSubmitted, onRefresh, onPageChanged, onReorder, onAccept, onWillAccept, onEnd
+  - Verifies `ref.mounted` checks after each `await` statement
+  - Prevents "Using ref when widget is unmounted" StateError
+  - **Production Impact**: Detected Sentry #7230735475 crash pattern
+
+### Fixed
+- **Scanner Coverage Gap**: Previous versions only scanned ConsumerState (ConsumerStatefulWidget)
+  - v1.2.x missed async callbacks in ConsumerWidget build methods
+  - v1.3.0 now scans **all three class types**: Riverpod providers, ConsumerState, ConsumerWidget
+  - Found 10 new violations in SocialScoreKeeper codebase (all legitimate)
+  - Zero false positives confirmed with comprehensive testing
+
+### Changed
+- Updated documentation to reflect 3 class types scanned (was 2)
+- Updated violation count to 15 types (was 14)
+- Added async event handler to WARNING violations category
+
+### Validation
+- Tested on SocialScoreKeeper production codebase (2,221 Dart files)
+- Found 12 total violations: 10 new (ConsumerWidget), 2 existing (addPostFrameCallback)
+- False positive rate: 0% (tested on safe code patterns)
+- Detects violations after multiple awaits with incorrect mounted check placement
+- No false positives on callbacks without await statements
+
+### Technical Details
+```dart
+// NOW DETECTED (Sentry #7230735475 pattern):
+class TournamentGameCardContent extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return InkWell(
+      onTap: () async {
+        final data = await someAsyncCall();
+        // ❌ Widget could have unmounted during await
+        final provider = ref.read(myProvider);  // CRASH
+      },
+    );
+  }
+}
+
+// CORRECT PATTERN:
+onTap: () async {
+  final data = await someAsyncCall();
+  if (!ref.mounted) return;  // ✅ Check after await
+  final provider = ref.read(myProvider);
+}
+```
+
+**Caused by**: Sentry issue #7230735475 - StateError in TournamentGameCardContent.build
+
 ## [1.2.2] - 2025-12-26
 
 ### Fixed
