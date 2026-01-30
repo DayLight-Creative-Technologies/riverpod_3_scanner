@@ -6,6 +6,37 @@ This guide explains how to publish new versions of `riverpod-3-scanner` to PyPI.
 
 ## 📋 Prerequisites
 
+### 0. Locate PyPI Credentials (Check First)
+
+**This project stores credentials in `.env` file in project root.**
+
+Check for existing credentials in this order:
+
+```bash
+# 1. Check for .env file in project root (RECOMMENDED for this project)
+cd /Users/stevencday/dev/riverpod_3_scanner
+cat .env
+# Should contain: PYPI_TOKEN=pypi-...
+
+# 2. Check for ~/.pypirc file (system-wide)
+cat ~/.pypirc
+
+# 3. Check for environment variables
+echo $TWINE_PASSWORD
+```
+
+**If using `.env` file** (recommended for this project):
+```bash
+# Source the .env file and upload
+cd /Users/stevencday/dev/riverpod_3_scanner
+source .env
+python3 -m twine upload dist/* --username __token__ --password $PYPI_TOKEN
+```
+
+**If credentials are missing**, proceed to setup below.
+
+---
+
 ### 1. PyPI Account Setup
 
 1. **Create PyPI account**: https://pypi.org/account/register/
@@ -123,11 +154,26 @@ pip install --index-url https://test.pypi.org/simple/ riverpod-3-scanner
 
 ### Step 7: Publish to PyPI
 
+**Method 1: Using .env file** (Recommended for this project):
 ```bash
+# Source .env and upload with token
+source .env
+python3 -m twine upload dist/* --username __token__ --password $PYPI_TOKEN
+```
+
+**Method 2: Using .pypirc**:
+```bash
+# Credentials loaded automatically from ~/.pypirc
 python3 -m twine upload dist/*
 ```
 
-**Enter PyPI credentials when prompted** (or use .pypirc)
+**Method 3: Interactive prompt**:
+```bash
+# Enter credentials when prompted
+python3 -m twine upload dist/*
+# Username: __token__
+# Password: pypi-YOUR_TOKEN_HERE
+```
 
 ### Step 8: Verify Publication
 
