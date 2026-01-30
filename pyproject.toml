@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "riverpod-3-scanner"
-version = "1.2.2"
+version = "1.3.0"
 description = "Comprehensive static analysis tool for detecting Riverpod 3.0 async safety violations in Flutter/Dart projects"
 readme = "README.md"
 license = {file = "LICENSE"}

@@ -6,15 +6,16 @@ Comprehensive static analysis tool for Flutter/Dart projects using Riverpod 3.0+
 Author: Steven Day
 Company: DayLight Creative Technologies
 License: MIT
-Version: 1.2.0
+Version: 1.3.0
 
 Detects ALL forbidden patterns that violate Riverpod 3.0 async safety standards.
 
-SCANS TWO CLASS TYPES:
+SCANS THREE CLASS TYPES:
 - Riverpod provider classes (extends _$ClassName)
 - ConsumerStatefulWidget State classes (extends ConsumerState<T>)
+- ConsumerWidget classes (extends ConsumerWidget)
 
-FORBIDDEN PATTERNS DETECTED (14 TYPES):
+FORBIDDEN PATTERNS DETECTED (15 TYPES):
 
 CRITICAL (Will crash in production):
 1. Field caching (nullable/dynamic fields with getters in async classes)
@@ -31,10 +32,11 @@ CRITICAL (Will crash in production):
 WARNINGS (High risk of crashes):
 11. Widget lifecycle methods with unsafe ref (didUpdateWidget, deactivate, reassemble)
 12. Timer/Future.delayed deferred callbacks without mounted checks
+13. Async event handler callbacks without mounted checks (onTap, onPressed, etc.)
 
 DEFENSIVE (Type safety & best practices):
-13. Untyped var lazy getters (loses type information)
-14. mounted vs ref.mounted confusion (educational - different lifecycles)
+14. Untyped var lazy getters (loses type information)
+15. mounted vs ref.mounted confusion (educational - different lifecycles)
 
 SPECIAL FEATURES:
 - Type inference for dynamic fields (suggests proper types)
@@ -670,6 +672,10 @@ class RiverpodScanner:
                 file_path, class_name, class_content, content, class_start, lines
             ))
 
+            violations.extend(self._check_async_event_handler_callbacks(
+                file_path, class_name, class_content, content, class_start, lines
+            ))
+
             violations.extend(self._check_untyped_lazy_getters(
                 file_path, class_name, class_content, content, class_start, lines, has_async_methods
             ))
@@ -682,6 +688,30 @@ class RiverpodScanner:
             # NOTE: Do NOT check mounted_confusion for ConsumerStatefulWidget
             # WidgetRef does NOT have a .mounted property - only 'mounted' from State is valid
             # The confusion check only applies to @riverpod provider classes with Ref
+
+        # Pattern 3: Find ConsumerWidget classes (extends ConsumerWidget)
+        consumer_widget_pattern = re.compile(r'class\s+(\w+)\s+extends\s+ConsumerWidget')
+
+        for consumer_match in consumer_widget_pattern.finditer(content):
+            class_name = consumer_match.group(1)
+            class_start = consumer_match.start()
+            class_end = self._find_class_end(content, class_start)
+            class_content = content[class_start:class_end]
+            class_lines = class_content.split('\n')
+
+            if self.verbose:
+                print(f"\n🔍 Analyzing {class_name} (ConsumerWidget):")
+
+            # VIOLATION 15: Async event handler callbacks without mounted checks
+            # This is the most common violation in ConsumerWidget - async callbacks in build
+            violations.extend(self._check_async_event_handler_callbacks(
+                file_path, class_name, class_content, content, class_start, lines
+            ))
+
+            # Also check deferred callbacks (Timer, Future.delayed, etc.)
+            violations.extend(self._check_deferred_callback_unsafe_ref(
+                file_path, class_name, class_content, content, class_start, lines
+            ))
 
         return violations
 
@@ -2236,6 +2266,149 @@ AFTER (SAFE):
 
 Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md"""
                 ))
+
+        return violations
+
+    def _check_async_event_handler_callbacks(
+        self, file_path: Path, class_name: str, class_content: str,
+        full_content: str, class_start: int, lines: List[str]
+    ) -> List[Violation]:
+        """Check for VIOLATION 15: Async event handler callbacks without mounted checks
+
+        Detects async lambda functions in event handlers (onTap, onPressed, etc.) that
+        use ref after await without checking ref.mounted.
+
+        This caused production crash Sentry #7230735475 - ref used in onTap callback
+        after widget was unmounted.
+        """
+        violations = []
+
+        # Common event handler patterns that accept async callbacks
+        # Pattern: onTap: () async { ... }, onPressed: () async { ... }, etc.
+        event_handlers = [
+            'onTap', 'onPressed', 'onLongPress', 'onChanged', 'onSubmitted',
+            'onSaved', 'onEditingComplete', 'onFieldSubmitted', 'onRefresh',
+            'onPageChanged', 'onReorder', 'onAccept', 'onWillAccept', 'onEnd'
+        ]
+
+        # Build regex pattern for async event handlers
+        # Matches: onTap: () async { ... }
+        for handler in event_handlers:
+            pattern = re.compile(
+                rf'{handler}\s*:\s*\(\)\s*async\s*\{{',
+                re.DOTALL
+            )
+
+            for match in pattern.finditer(class_content):
+                callback_start = match.end()
+                callback_end = self._find_callback_end(class_content, callback_start - 1)
+                callback_content = class_content[callback_start:callback_end]
+
+                # Check if callback has await statements
+                await_pattern = re.compile(r'\bawait\s+')
+                await_matches = list(await_pattern.finditer(callback_content))
+
+                if not await_matches:
+                    # No await, no risk of unmounting during execution
+                    continue
+
+                # Check if callback uses ref after any await
+                ref_usages = []
+                ref_pattern = re.compile(r'\bref\.(read|watch|listen)\(')
+
+                for ref_match in ref_pattern.finditer(callback_content):
+                    ref_pos = ref_match.start()
+
+                    # Check if this ref usage is after any await
+                    for await_match in await_matches:
+                        if ref_pos > await_match.end():
+                            # This ref usage is after an await
+                            ref_usages.append(ref_match)
+                            break
+
+                if not ref_usages:
+                    # No ref usage after await, safe
+                    continue
+
+                # Now check if there's a mounted check before the ref usage
+                # Look for: if (!ref.mounted) return; or if (!mounted) return;
+                mounted_checks = list(re.finditer(
+                    r'if\s*\(\s*!\s*(ref\.)?mounted\s*\)\s*return',
+                    callback_content
+                ))
+
+                # For each ref usage after await, verify there's a mounted check
+                for ref_usage in ref_usages:
+                    ref_pos = ref_usage.start()
+
+                    # Find the last mounted check before this ref usage
+                    last_mounted_check = None
+                    for mounted_check in mounted_checks:
+                        if mounted_check.start() < ref_pos:
+                            last_mounted_check = mounted_check
+
+                    # Check if there's an await between the last mounted check and ref usage
+                    has_await_after_check = False
+                    if last_mounted_check:
+                        check_pos = last_mounted_check.end()
+                        for await_match in await_matches:
+                            if check_pos < await_match.start() < ref_pos:
+                                has_await_after_check = True
+                                break
+                    else:
+                        # No mounted check at all before ref usage
+                        has_await_after_check = True
+
+                    if has_await_after_check or last_mounted_check is None:
+                        # VIOLATION: ref used after await without proper mounted check
+                        abs_line = full_content[:class_start + match.start()].count('\n') + 1
+                        snippet_start = max(0, abs_line - 1)
+                        snippet_end = min(len(lines), abs_line + 15)
+                        snippet = '\n'.join(f"  {i+1:4d} | {lines[i]}" for i in range(snippet_start, snippet_end))
+
+                        violations.append(Violation(
+                            file_path=str(file_path),
+                            class_name=class_name,
+                            violation_type=ViolationType.DEFERRED_CALLBACK_UNSAFE_REF,
+                            line_number=abs_line,
+                            context=f"CRITICAL: {handler} async callback uses ref after await without ref.mounted check",
+                            code_snippet=snippet,
+                            fix_instructions=f"""CRITICAL: Async event handler callbacks MUST check ref.mounted before ref operations
+
+❌ PROBLEM: Widget may unmount while async {handler} callback is executing
+   When async callbacks execute across await boundaries, the widget could be disposed
+   before the callback completes. Using ref after the widget unmounts causes StateError.
+
+   **PRODUCTION CRASH**: This pattern caused Sentry issue #7230735475
+
+✅ FIX: Always check ref.mounted AFTER each await and BEFORE each ref operation
+
+BEFORE (CRASHES):
+   {handler}: () async {{
+     final data = await someAsyncCall();
+     // Widget could have unmounted during the await
+     final provider = ref.read(myProvider);  // ❌ CRASH if unmounted
+     provider.doSomething(data);
+   }}
+
+AFTER (SAFE):
+   {handler}: () async {{
+     final data = await someAsyncCall();
+     if (!ref.mounted) return;  // ✅ Check after await
+     final provider = ref.read(myProvider);
+     provider.doSomething(data);
+   }}
+
+PATTERN: ref.mounted checks AFTER every await statement in async callbacks
+
+For ConsumerWidget: Use `if (!ref.mounted) return;`
+For ConsumerStatefulWidget: Use `if (!mounted) return;`
+
+Reference: docs/quick_reference/async_patterns.md
+Caused by: Sentry #7230735475 - StateError in TournamentGameCardContent.build"""
+                        ))
+                        # Only report once per callback
+                        break
 
         return violations
 
