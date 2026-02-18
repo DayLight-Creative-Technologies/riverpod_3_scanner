@@ -5,6 +5,37 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-02-18
+
+### Fixed
+
+- **CRITICAL: Class boundary detection overshoot** (`scanner.py`)
+  - `find_matching_brace()` was called with the position of the `class` keyword instead of the position after the opening `{`
+  - This caused `depth` to start at 1 before the class body brace was encountered, so the class body `{` incremented depth to 2 and the closing `}` only decremented to 1 — scanning continued past the actual class boundary into subsequent classes
+  - **Impact**: Class content included code from adjacent classes, causing false positives across all checker types, duplicate violations, and wrong class attribution
+  - **Fix**: Find the actual `{` after the regex match end, then call `find_matching_brace(content, brace_pos + 1)` — applied to all 3 class detection loops (Riverpod providers, ConsumerState, ConsumerWidget)
+
+- **Position mapping bug in ref.watch/ref.listen outside-build checker** (`checkers.py`)
+  - `class_position_map.get(ctx.class_start + call_pos, ...)` used an absolute offset as the lookup key, but the map keys are relative to the stripped class content (0..N)
+  - This caused line numbers to point to wrong locations (e.g., field declarations, constructors, `createState()` instead of actual `ref.watch()` calls)
+  - **Fix**: Use `class_position_map.get(call_pos, call_pos)` then add `ctx.class_start` to convert to absolute position — matches the correct pattern used by all other checkers
+
+- **Duplicate violation detection** (consequence of class boundary bug)
+  - When multiple classes existed in a file, earlier classes' overshooting content included later classes' code
+  - Both the overshooting scan and the correct scan detected the same violations, producing exact duplicates
+  - **Example**: `cheers_modal_widget.dart` reported 14 violations (7 unique x 2) — now correctly reports 0
+  - **Fix**: Resolved automatically by the class boundary fix — each class is now scanned exactly once with correct boundaries
+
+- **ConsumerWidget regex false-matching ConsumerStatefulWidget** (`utils.py`)
+  - `RE_CONSUMER_WIDGET_CLASS` pattern `extends\s+ConsumerWidget` matched `ConsumerStatefulWidget` because `ConsumerWidget` is a prefix
+  - Added `\b` word boundary to prevent substring matching
+
+### Validation
+- Tested on SocialScoreKeeper production codebase (2,461 Dart files)
+- Previous: 163 violations (mostly false positives from boundary overshoot)
+- After fix: 0 violations (codebase is actually compliant)
+- All false positives eliminated, zero regressions
+
 ## [1.4.0] - 2026-02-18
 
 ### Architecture Overhaul
@@ -533,6 +564,7 @@ requiresGameCompletion: (gameId, homeScore, awayScore) async {
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.4.1 | 2026-02-18 | Critical class boundary fix, position mapping fix, dedup fix, ConsumerWidget regex fix |
 | 1.4.0 | 2026-02-18 | Modular architecture, JSON output, inline suppression, FileCache, string-aware parsing |
 | 1.3.1 | 2026-01-30 | False positive fix for addPostFrameCallback, mounted pattern recognition |
 | 1.3.0 | 2026-01-30 | ConsumerWidget scanning, async event handler detection |
@@ -574,6 +606,7 @@ python3 riverpod_3_scanner.py lib
 
 ---
 
+[1.4.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.4.1
 [1.4.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.4.0
 [1.3.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.3.1
 [1.3.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.3.0

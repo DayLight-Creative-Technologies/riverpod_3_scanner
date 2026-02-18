@@ -1041,8 +1041,9 @@ def check_ref_operations_outside_build(ctx: CheckContext) -> List[Violation]:
         call_pos = listen_match.start()
 
         if not is_in_safe_context(call_pos):
-            original_pos = class_position_map.get(ctx.class_start + call_pos, ctx.class_start + call_pos)
-            abs_line = ctx.full_content[:original_pos].count('\n') + 1
+            original_class_pos = class_position_map.get(call_pos, call_pos)
+            abs_pos = ctx.class_start + original_class_pos
+            abs_line = ctx.full_content[:abs_pos].count('\n') + 1
             snippet_start = max(0, abs_line - 3)
             snippet_end = min(len(ctx.lines), abs_line + 5)
             snippet = '\n'.join(f"  {i + 1:4d} | {ctx.lines[i]}" for i in range(snippet_start, snippet_end))
@@ -1093,8 +1094,9 @@ Reference: Sentry #7088955972 - Production crash from ref.listen in initState
         call_pos = watch_match.start()
 
         if not is_in_safe_context(call_pos):
-            original_pos = class_position_map.get(ctx.class_start + call_pos, ctx.class_start + call_pos)
-            abs_line = ctx.full_content[:original_pos].count('\n') + 1
+            original_class_pos = class_position_map.get(call_pos, call_pos)
+            abs_pos = ctx.class_start + original_class_pos
+            abs_line = ctx.full_content[:abs_pos].count('\n') + 1
             snippet_start = max(0, abs_line - 3)
             snippet_end = min(len(ctx.lines), abs_line + 5)
             snippet = '\n'.join(f"  {i + 1:4d} | {ctx.lines[i]}" for i in range(snippet_start, snippet_end))

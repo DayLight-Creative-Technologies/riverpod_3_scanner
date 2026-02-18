@@ -25,7 +25,7 @@ RE_CONSUMER_STATE_CLASS = re.compile(
     r'class\s+(\w+)\s+extends\s+ConsumerState<(\w+)>'
 )
 RE_CONSUMER_WIDGET_CLASS = re.compile(
-    r'class\s+(\w+)\s+extends\s+ConsumerWidget'
+    r'class\s+(\w+)\s+extends\s+ConsumerWidget\b'
 )
 
 # Async method signatures

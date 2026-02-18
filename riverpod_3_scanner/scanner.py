@@ -6,7 +6,7 @@ Comprehensive static analysis tool for Flutter/Dart projects using Riverpod 3.0+
 Author: Steven Day
 Company: DayLight Creative Technologies
 License: MIT
-Version: 1.4.0
+Version: 1.4.1
 
 Detects ALL forbidden patterns that violate Riverpod 3.0 async safety standards.
 
@@ -134,8 +134,11 @@ class RiverpodScanner:
         for match in RE_PROVIDER_CLASS.finditer(content):
             class_name = match.group(1)
             class_start = match.start()
-            class_end = find_matching_brace(content, class_start)
-            class_content = content[class_start:class_end]
+            brace_pos = content.find('{', match.end())
+            if brace_pos == -1:
+                continue
+            class_end = find_matching_brace(content, brace_pos + 1)
+            class_content = content[class_start:class_end + 1]
 
             async_methods = find_async_methods(class_content)
             has_async = len(async_methods) > 0
@@ -172,8 +175,11 @@ class RiverpodScanner:
         for match in RE_CONSUMER_STATE_CLASS.finditer(content):
             class_name = match.group(1)
             class_start = match.start()
-            class_end = find_matching_brace(content, class_start)
-            class_content = content[class_start:class_end]
+            brace_pos = content.find('{', match.end())
+            if brace_pos == -1:
+                continue
+            class_end = find_matching_brace(content, brace_pos + 1)
+            class_content = content[class_start:class_end + 1]
 
             async_methods = find_async_methods(class_content)
             has_async = len(async_methods) > 0
@@ -220,8 +226,11 @@ class RiverpodScanner:
         for match in RE_CONSUMER_WIDGET_CLASS.finditer(content):
             class_name = match.group(1)
             class_start = match.start()
-            class_end = find_matching_brace(content, class_start)
-            class_content = content[class_start:class_end]
+            brace_pos = content.find('{', match.end())
+            if brace_pos == -1:
+                continue
+            class_end = find_matching_brace(content, brace_pos + 1)
+            class_content = content[class_start:class_end + 1]
 
             if self.verbose:
                 print(f"\n\U0001f50d Analyzing {class_name} (ConsumerWidget):")
