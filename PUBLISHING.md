@@ -1,325 +1,181 @@
-# Publishing to PyPI - Guide for Maintainers
+# Publishing to PyPI
 
-This guide explains how to publish new versions of `riverpod-3-scanner` to PyPI.
+## THE COMMAND (copy-paste this)
 
----
-
-## 📋 Prerequisites
-
-### 0. Locate PyPI Credentials (Check First)
-
-**This project stores credentials in `.env` file in project root.**
-
-Check for existing credentials in this order:
+Every publish follows this exact sequence. No variations, no alternatives.
 
 ```bash
-# 1. Check for .env file in project root (RECOMMENDED for this project)
+# 1. cd into the project (ALL commands run from here)
 cd /Users/stevencday/dev/riverpod_3_scanner
-cat .env
-# Should contain: PYPI_TOKEN=pypi-...
 
-# 2. Check for ~/.pypirc file (system-wide)
-cat ~/.pypirc
-
-# 3. Check for environment variables
-echo $TWINE_PASSWORD
-```
-
-**If using `.env` file** (recommended for this project):
-```bash
-# Source the .env file and upload
-cd /Users/stevencday/dev/riverpod_3_scanner
-source .env
-python3 -m twine upload dist/* --username __token__ --password $PYPI_TOKEN
-```
-
-**If credentials are missing**, proceed to setup below.
-
----
-
-### 1. PyPI Account Setup
-
-1. **Create PyPI account**: https://pypi.org/account/register/
-2. **Create API token**:
-   - Go to: https://pypi.org/manage/account/token/
-   - Create token with scope: "Entire account" (for first publish) or "Project: riverpod-3-scanner"
-   - Save token securely (starts with `pypi-`)
-
-### 2. Configure Credentials
-
-**Option A: Using .pypirc** (Recommended)
-```bash
-cat > ~/.pypirc <<EOF
-[pypi]
-username = __token__
-password = pypi-YOUR_TOKEN_HERE
-EOF
-
-chmod 600 ~/.pypirc
-```
-
-**Option B: Environment Variable**
-```bash
-export TWINE_USERNAME=__token__
-export TWINE_PASSWORD=pypi-YOUR_TOKEN_HERE
-```
-
-### 3. Install Publishing Tools
-
-```bash
-pip install --upgrade build twine
-```
-
----
-
-## 🚀 Publishing New Version
-
-### Step 1: Update Version
-
-Update version in **3 files**:
-
-1. **pyproject.toml**:
-   ```toml
-   version = "1.0.1"  # Update this
-   ```
-
-2. **setup.py**:
-   ```python
-   version="1.0.1",  # Update this
-   ```
-
-3. **riverpod_3_scanner/__init__.py**:
-   ```python
-   __version__ = "1.0.1"  # Update this
-   ```
-
-### Step 2: Update CHANGELOG.md
-
-Add new version section:
-```markdown
-## [1.0.1] - 2025-12-XX
-
-### Added
-- New feature description
-
-### Fixed
-- Bug fix description
-
-### Changed
-- Change description
-```
-
-### Step 3: Clean Previous Builds
-
-```bash
-cd /Users/stevencday/dev/riverpod_3_scanner
+# 2. Clean old builds
 rm -rf dist/ build/ *.egg-info
+
+# 3. Build
+python3 -m build
+
+# 4. Validate
+python3 -m twine check dist/*
+
+# 5. Upload (source .env for the token, then upload in the same command)
+source .env && python3 -m twine upload dist/* --username __token__ --password $PYPI_TOKEN
+
+# 6. Tag and push (if not already tagged)
+git tag -a vX.Y.Z -m "Release version X.Y.Z"
+git push origin vX.Y.Z
 ```
 
-### Step 4: Build Package
+That's it. If every step succeeds, you're done. Read on only if something fails.
 
+---
+
+## Before You Publish: Version Bump Checklist
+
+Version must be updated in **exactly 3 files** (all must match):
+
+| File | Field |
+|------|-------|
+| `pyproject.toml` | `version = "X.Y.Z"` |
+| `setup.py` | `version="X.Y.Z",` |
+| `riverpod_3_scanner/__init__.py` | `__version__ = "X.Y.Z"` |
+
+Also update `CHANGELOG.md` with the new version's changes.
+
+Semantic versioning: MAJOR.MINOR.PATCH
+- PATCH: bug fixes
+- MINOR: new features (backward compatible)
+- MAJOR: breaking changes
+
+---
+
+## Troubleshooting
+
+### IMPORTANT: Read This Before Trying Anything Else
+
+**The token is almost certainly fine.** The `.env` file at the project root contains a valid PyPI API token. It has worked for every release from v1.0.0 through v1.4.1. If upload fails, check the causes below IN ORDER before even considering token issues.
+
+### Error: "File already exists" (HTTP 400)
+
+**This is the #1 most common error.** It means the version you're trying to upload already exists on PyPI. PyPI does not allow overwriting published versions — ever.
+
+**Fix:** Bump the version in all 3 files, rebuild, and upload again.
+
+**How to check what's already published:**
 ```bash
+pip3 index versions riverpod-3-scanner
+```
+
+### Error: dist/ contains stale or wrong-version artifacts
+
+If you updated the version in the 3 files but didn't rebuild, `dist/` still has the OLD version's `.whl` and `.tar.gz`. The upload will either fail ("file already exists" for the old version) or succeed uploading the wrong version.
+
+**Fix:** Always clean and rebuild before uploading:
+```bash
+rm -rf dist/ build/ *.egg-info
 python3 -m build
 ```
 
-**Expected output**:
-```
-Successfully built riverpod_3_scanner-1.0.1.tar.gz and riverpod_3_scanner-1.0.1-py3-none-any.whl
+**How to verify:** Check that the filenames in `dist/` match your intended version:
+```bash
+ls dist/
+# Should show: riverpod_3_scanner-X.Y.Z-py3-none-any.whl
+#              riverpod_3_scanner-X.Y.Z.tar.gz
 ```
 
-### Step 5: Validate Package
+### Error: "No module named build" or "No module named twine"
+
+Publishing tools aren't installed.
+
+**Fix:**
+```bash
+pip3 install --upgrade build twine
+```
+
+### Error: twine check fails with "FAILED"
+
+The package metadata is malformed — usually a syntax error in `pyproject.toml` or `setup.py`, or the README has invalid markdown that can't render.
+
+**Fix:** Read the error message. It will tell you exactly what's wrong (usually a field format issue or bad reStructuredText).
+
+### Error: "403 Forbidden" on upload
+
+This actually IS a token issue — but it's rare. Possible causes:
+1. The `.env` file was deleted or corrupted
+2. The token was revoked on pypi.org
+3. The token scope is limited to a different project name
+
+**Diagnosis:**
+```bash
+# Check that .env exists and has content
+cat /Users/stevencday/dev/riverpod_3_scanner/.env
+# Should show: PYPI_TOKEN=pypi-...
+
+# Verify the variable loaded
+source /Users/stevencday/dev/riverpod_3_scanner/.env
+echo $PYPI_TOKEN
+# Should print a long string starting with pypi-
+```
+
+If the file is missing or empty, create a new token at https://pypi.org/manage/account/token/ with scope "Project: riverpod-3-scanner" and save it:
+```bash
+echo 'PYPI_TOKEN=pypi-YOUR_NEW_TOKEN' > /Users/stevencday/dev/riverpod_3_scanner/.env
+```
+
+### "Package not found" immediately after upload
+
+Normal. PyPI CDN takes 1-2 minutes to propagate. Wait, then try again.
+
+---
+
+## Credentials
+
+This project uses ONE credential method: a `.env` file in the project root.
+
+**Location:** `/Users/stevencday/dev/riverpod_3_scanner/.env`
+**Format:** `PYPI_TOKEN=pypi-...`
+**Usage:** `source .env` loads the token, then pass it to twine via `--password $PYPI_TOKEN`
+
+Do NOT use `~/.pypirc`, do NOT use `TWINE_PASSWORD` environment variables, do NOT use interactive prompts. Those are alternative methods documented elsewhere on the internet — this project uses `.env` and that is the only method that should be attempted.
+
+---
+
+## Post-Publish Verification
 
 ```bash
-python3 -m twine check dist/*
-```
+# Verify version is live (may take 1-2 min after upload)
+pip3 index versions riverpod-3-scanner
 
-**Expected output**:
-```
-Checking dist/riverpod_3_scanner-1.0.1-py3-none-any.whl: PASSED
-Checking dist/riverpod_3_scanner-1.0.1.tar.gz: PASSED
-```
+# Verify package page
+# https://pypi.org/project/riverpod-3-scanner/
 
-### Step 6: Test on TestPyPI (RECOMMENDED)
-
-Upload to TestPyPI first to verify everything works:
-
-```bash
-python3 -m twine upload --repository testpypi dist/*
-```
-
-Test installation from TestPyPI:
-```bash
-pip install --index-url https://test.pypi.org/simple/ riverpod-3-scanner
-```
-
-### Step 7: Publish to PyPI
-
-**Method 1: Using .env file** (Recommended for this project):
-```bash
-# Source .env and upload with token
-source .env
-python3 -m twine upload dist/* --username __token__ --password $PYPI_TOKEN
-```
-
-**Method 2: Using .pypirc**:
-```bash
-# Credentials loaded automatically from ~/.pypirc
-python3 -m twine upload dist/*
-```
-
-**Method 3: Interactive prompt**:
-```bash
-# Enter credentials when prompted
-python3 -m twine upload dist/*
-# Username: __token__
-# Password: pypi-YOUR_TOKEN_HERE
-```
-
-### Step 8: Verify Publication
-
-Check package page: https://pypi.org/project/riverpod-3-scanner/
-
-Test installation:
-```bash
-pip install riverpod-3-scanner
+# Test installation
+pip3 install --upgrade riverpod-3-scanner
 riverpod-3-scanner --help
 ```
 
-### Step 9: Tag Release in Git
-
-```bash
-git tag -a v1.0.1 -m "Release version 1.0.1"
-git push origin v1.0.1
-```
-
-### Step 10: Create GitHub Release
-
-1. Go to: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/new
-2. Choose tag: `v1.0.1`
-3. Title: `Release v1.0.1`
-4. Description: Copy from CHANGELOG.md
-5. Attach files: `dist/riverpod_3_scanner-1.0.1.tar.gz` and `.whl`
-6. Publish release
-
 ---
 
-## 🔄 Version Numbering
-
-Follow Semantic Versioning (https://semver.org):
-
-- **MAJOR** (1.x.x): Breaking changes
-- **MINOR** (x.1.x): New features (backward compatible)
-- **PATCH** (x.x.1): Bug fixes (backward compatible)
-
-Examples:
-- `1.0.0` → `1.0.1` - Bug fix
-- `1.0.1` → `1.1.0` - New violation type detection
-- `1.1.0` → `2.0.0` - Breaking CLI changes
-
----
-
-## 🧪 Testing Checklist
-
-Before publishing, verify:
-
-- ✅ Version updated in 3 files (pyproject.toml, setup.py, __init__.py)
-- ✅ CHANGELOG.md updated with release notes
-- ✅ `python3 -m build` succeeds
-- ✅ `python3 -m twine check dist/*` passes
-- ✅ Local installation works: `pip install -e .`
-- ✅ Command works: `riverpod-3-scanner --help`
-- ✅ Module works: `python3 -m riverpod_3_scanner --help`
-- ✅ All tests pass (if you have tests)
-- ✅ Documentation updated (README.md references correct version)
-
----
-
-## 🚨 First-Time Publishing (v1.0.0)
-
-For the initial v1.0.0 release:
-
-### Step 1: Create PyPI Account & Token
-
-1. Register at https://pypi.org/account/register/
-2. Verify email address
-3. Create API token (entire account scope)
-4. Save token securely
-
-### Step 2: Build and Upload
-
-```bash
-cd /Users/stevencday/dev/riverpod_3_scanner
-
-# Clean
-rm -rf dist/ build/ *.egg-info
-
-# Build
-python3 -m build
-
-# Validate
-python3 -m twine check dist/*
-
-# Upload to PyPI
-python3 -m twine upload dist/*
-# Enter: __token__
-# Password: pypi-YOUR_TOKEN_HERE
-```
-
-### Step 3: Verify
-
-```bash
-# Wait 1-2 minutes for PyPI to process
-pip install riverpod-3-scanner
-
-# Test
-riverpod-3-scanner --help
-python3 -m riverpod_3_scanner --help
-```
-
-### Step 4: Update README.md
-
-Add installation instructions:
-```markdown
-## Installation
-
-### Via pip (Recommended)
-```bash
-pip install riverpod-3-scanner
-```
-
-### Via GitHub
-```bash
-curl -O https://raw.githubusercontent.com/DayLight-Creative-Technologies/riverpod_3_scanner/main/riverpod_3_scanner/scanner.py
-```
-\`\`\`
-```
-
-### Step 5: Tag and Release on GitHub
-
-```bash
-git tag -a v1.0.0 -m "Initial PyPI release v1.0.0"
-git push origin v1.0.0
-```
-
-Create GitHub release with dist files attached.
-
----
-
-## 📦 Package Structure
+## Package Structure
 
 ```
 riverpod_3_scanner/
-├── pyproject.toml              # Modern package config
-├── setup.py                    # Backward compatibility
-├── MANIFEST.in                 # Include non-Python files
+├── pyproject.toml              # Package config (version lives here)
+├── setup.py                    # Backward compat (version lives here too)
+├── MANIFEST.in                 # Include non-Python files in sdist
 ├── README.md                   # PyPI landing page
-├── LICENSE                     # MIT License
+├── LICENSE                     # MIT
 ├── CHANGELOG.md                # Version history
-├── riverpod_3_scanner/         # Package directory
-│   ├── __init__.py            # Package exports
+├── .env                        # PyPI token (not committed to git)
+├── riverpod_3_scanner/         # Package source
+│   ├── __init__.py            # Version + exports (version lives here too)
 │   ├── __main__.py            # python -m support
-│   └── scanner.py             # Main scanner code
-└── docs/                       # Additional docs
+│   ├── scanner.py             # Orchestrator
+│   ├── models.py              # Data models
+│   ├── utils.py               # Parsing utilities
+│   ├── analysis.py            # Call-graph analysis
+│   ├── checkers.py            # Violation detectors
+│   └── output.py              # Formatters
+└── docs/
     ├── GUIDE.md
     ├── EXAMPLES.md
     └── PACKAGE_INFO.md
@@ -327,69 +183,15 @@ riverpod_3_scanner/
 
 ---
 
-## 🔧 Troubleshooting
+## First-Time Setup (Already Done — Reference Only)
 
-### "Invalid distribution" error
+This section documents initial setup that was completed for v1.0.0. You should never need this again unless setting up on a completely new machine.
 
-Check pyproject.toml syntax:
-```bash
-python3 -c "import tomllib; tomllib.load(open('pyproject.toml', 'rb'))"
-```
-
-### "Package not found" after upload
-
-Wait 1-2 minutes for PyPI CDN to propagate, then try again.
-
-### "File already exists" error
-
-You cannot overwrite a version on PyPI. Increment version number and republish.
-
-### twine upload fails with authentication error
-
-1. Verify API token is correct
-2. Check ~/.pypirc format
-3. Try environment variable method instead
-
----
-
-## 📊 Post-Publication Checklist
-
-After successful PyPI publication:
-
-- ✅ Verify package page: https://pypi.org/project/riverpod-3-scanner/
-- ✅ Test `pip install riverpod-3-scanner`
-- ✅ Test `riverpod-3-scanner --help`
-- ✅ Update README.md with pip install instructions
-- ✅ Create GitHub release with tag
-- ✅ Announce on social media/forums
-- ✅ Update documentation with PyPI badge
-
----
-
-## 🎯 Quick Commands Reference
-
-```bash
-# Clean build artifacts
-rm -rf dist/ build/ *.egg-info
-
-# Build package
-python3 -m build
-
-# Validate package
-python3 -m twine check dist/*
-
-# Upload to TestPyPI (testing)
-python3 -m twine upload --repository testpypi dist/*
-
-# Upload to PyPI (production)
-python3 -m twine upload dist/*
-
-# Install locally for testing
-pip install -e .
-
-# Uninstall
-pip uninstall riverpod-3-scanner
-```
+1. Create PyPI account: https://pypi.org/account/register/
+2. Create API token at https://pypi.org/manage/account/token/ (scope: project `riverpod-3-scanner`)
+3. Save token to `.env`: `echo 'PYPI_TOKEN=pypi-...' > .env`
+4. Install tools: `pip3 install --upgrade build twine`
+5. Follow "THE COMMAND" section above
 
 ---
 
