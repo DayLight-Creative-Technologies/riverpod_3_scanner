@@ -5,6 +5,53 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-02-18
+
+### Architecture Overhaul
+- **Modular codebase**: Monolithic 3,499-line `scanner.py` split into 6 focused modules:
+  - `models.py` — Data models, enums, type aliases (ViolationType, Violation, Severity, MethodMetadata)
+  - `utils.py` — File caching, string-aware Dart parsing, compiled regex patterns, suppression support
+  - `analysis.py` — Multi-pass call-graph analysis (Passes 1, 1.5, 2, 2.5) with AnalysisContext
+  - `checkers.py` — All 12 violation detection functions with shared CheckContext
+  - `output.py` — Text and JSON output formatters
+  - `scanner.py` — Slim orchestrator (~300 lines) wiring modules together
+- **Total**: ~4,500 lines across 6 files (vs 3,499 in one file) — more code for better structure
+
+### New Features
+- **JSON output format** (`--format json`) for CI/CD integration and IDE tooling
+  - Structured JSON with violations, severity counts, type counts, and scanner metadata
+  - `riverpod-3-scanner lib --format json` for machine-readable output
+- **Inline suppression comments**
+  - `// riverpod_scanner:ignore` — suppress a specific violation on the next line
+  - `// riverpod_scanner:ignore-file` — suppress all violations in a file
+  - Suppressed count reported in summary output
+- **File-level suppression** via `// riverpod_scanner:ignore-file` at top of file
+
+### Performance
+- **FileCache**: Each file read exactly once and cached in memory (eliminates ~17,000 redundant reads in Pass 2)
+- **O(1) method lookups**: Secondary index `(class_name, method_name) -> MethodKey` replaces O(n) linear scans
+- **Pre-compiled regex**: All 30+ regex patterns compiled at module level (not in hot loops)
+
+### Correctness
+- **String-aware brace counting**: `find_matching_brace()` correctly handles string literals (single, double, triple-quoted, raw strings) and comments — fixes edge cases where brace characters inside strings caused incorrect class/method boundary detection
+- **Unified comment stripping**: Single implementation used consistently across all checkers
+- **Improved detection accuracy**: String-aware parsing finds violations previously masked by incorrect class boundary detection
+
+### Changed
+- `RiverpodScanner` class maintains backward-compatible public API (`scan_file`, `scan_directory`, `format_violation`, `print_summary`)
+- CLI adds `--format` flag (default: `text`, also accepts `json`)
+- Violation detection delegated to standalone functions in `checkers.py` via shared `CheckContext`
+
+### Roadmap Items Completed
+- [x] JSON output format for CI/CD integration (from v1.1.0 roadmap)
+- [x] Whitelist/ignore patterns via inline suppression (from v1.2.0 roadmap)
+- [x] Performance optimizations for large codebases (from v1.1.0 roadmap)
+
+### Validation
+- Tested on SocialScoreKeeper production codebase (2,461 Dart files)
+- All imports pass, full scan completes successfully
+- Backward-compatible: same CLI interface, same violation types, same exit codes
+
 ## [1.3.1] - 2026-01-30
 
 ### Fixed
@@ -460,20 +507,18 @@ requiresGameCompletion: (gameId, homeScore, awayScore) async {
 
 ## Upcoming Features (Roadmap)
 
-### [1.1.0] - Planned
-- [ ] JSON output format for IDE integration
+### [1.5.0] - Planned
 - [ ] Auto-fix capabilities for common violations
 - [ ] VSCode extension integration
 - [ ] IntelliJ/Android Studio plugin
 - [ ] HTML report generation
-- [ ] Performance optimizations for large codebases (100k+ lines)
-
-### [1.2.0] - Planned
-- [ ] Custom violation type definitions
-- [ ] Configurable severity levels
-- [ ] Whitelist/ignore patterns
 - [ ] Incremental scanning (only changed files)
 - [ ] Parallel file processing
+
+### [1.6.0] - Planned
+- [ ] Custom violation type definitions
+- [ ] Configurable severity levels via config file
+- [ ] Test suite with comprehensive regression tests
 
 ### [2.0.0] - Future
 - [ ] Real-time IDE integration (LSP)
@@ -488,6 +533,14 @@ requiresGameCompletion: (gameId, homeScore, awayScore) async {
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.4.0 | 2026-02-18 | Modular architecture, JSON output, inline suppression, FileCache, string-aware parsing |
+| 1.3.1 | 2026-01-30 | False positive fix for addPostFrameCallback, mounted pattern recognition |
+| 1.3.0 | 2026-01-30 | ConsumerWidget scanning, async event handler detection |
+| 1.2.2 | 2025-12-26 | Package metadata fix |
+| 1.2.1 | 2025-12-26 | late final field detection, non-nullable getter detection |
+| 1.2.0 | 2025-12-21 | Comprehensive field caching, nested generics, context-aware fixes |
+| 1.1.1 | 2025-12-15 | return await false positive fix, refined significant code detection |
+| 1.1.0 | 2025-12-15 | Enhanced missing-mounted-after-await detection |
 | 1.0.2 | 2025-12-14 | FutureOr detection, ref.watch/listen detection, comment stripping |
 | 1.0.1 | 2025-12-14 | Nested callback detection fix |
 | 1.0.0 | 2025-12-14 | Full call-graph analysis, zero false positives |
@@ -521,6 +574,14 @@ python3 riverpod_3_scanner.py lib
 
 ---
 
+[1.4.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.4.0
+[1.3.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.3.1
+[1.3.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.3.0
+[1.2.2]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.2.2
+[1.2.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.2.1
+[1.2.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.2.0
+[1.1.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.1.1
+[1.1.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.1.0
 [1.0.2]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.0.2
 [1.0.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.0.1
 [1.0.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.0.0
