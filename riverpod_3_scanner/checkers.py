@@ -31,6 +31,11 @@ from .utils import (
     RE_REF_ALL_OPERATIONS,
     RE_MOUNTED_CHECK_BROAD,
     RE_MOUNTED_CHECK_WIDGET,
+    RE_REF_FIELD_STORAGE,
+    RE_ANY_CLASS_DECL,
+    RE_PROVIDER_CLASS,
+    RE_CONSUMER_STATE_CLASS,
+    RE_CONSUMER_WIDGET_CLASS,
     FRAMEWORK_LIFECYCLE_METHODS,
     EVENT_HANDLERS,
 )
@@ -2135,5 +2140,163 @@ File: lib/presentation/features/game/views/game_chat_view.dart
 
 Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
                 ))
+
+    return violations
+
+
+# ===========================================================================
+# CHECKER 13: check_ref_stored_as_field
+# ===========================================================================
+
+def check_ref_stored_as_field(
+    file_path: Path,
+    content: str,
+    lines: List[str],
+) -> List[Violation]:
+    """Check for Ref stored as a field in non-Riverpod plain classes.
+
+    Riverpod notifier classes (extends _$X), ConsumerState, and ConsumerWidget
+    legitimately receive ``ref`` from the framework. Plain Dart classes that
+    store ``Ref`` as a field are forbidden because:
+
+    1. The creating provider may auto-dispose, invalidating the stored Ref.
+    2. Any subsequent ``ref.read()`` / ``ref.watch()`` call on the disposed Ref
+       throws ``UnmountedRefException`` (production crash).
+    3. It violates the architectural rule: "Never pass or store Ref in plain classes."
+
+    Detection:
+    - Finds ALL ``class`` declarations in the file.
+    - Skips classes that extend ``_$*`` (Riverpod notifiers), ``ConsumerState``,
+      or ``ConsumerWidget`` — these get ``ref`` from the framework.
+    - Checks the class body for ``final Ref <name>;`` field declarations
+      (with optional ``@override`` and ``late`` modifiers).
+
+    This check runs at file scope (not per-CheckContext) because it must scan
+    classes that are NOT Riverpod notifiers — the main scanner loop only visits
+    _$, ConsumerState, and ConsumerWidget classes.
+    """
+    violations: List[Violation] = []
+
+    # Strip comments to avoid matching 'class' inside doc comments
+    # (e.g. "/// Pure implementation class for auth event stream" would
+    # match 'class for' as a class declaration without stripping).
+    stripped, pos_map = strip_comments(content)
+
+    for class_match in RE_ANY_CLASS_DECL.finditer(stripped):
+        class_name = class_match.group(1)
+        extends_name = class_match.group(2)  # None if no extends clause
+
+        # Skip Dart keywords that look like class names due to regex greediness
+        # (e.g., 'class for' after comment stripping could leave artifacts)
+        if class_name in ('for', 'if', 'else', 'switch', 'while', 'do',
+                          'return', 'var', 'final', 'const', 'new', 'this',
+                          'super', 'true', 'false', 'null', 'void', 'is',
+                          'as', 'in', 'with', 'try', 'catch', 'throw',
+                          'enum', 'mixin', 'typedef', 'import', 'export',
+                          'library', 'part', 'late', 'required', 'get',
+                          'set', 'static', 'abstract', 'external', 'factory'):
+            continue
+
+        # Map stripped position back to original content position
+        orig_pos = pos_map.get(class_match.start(), class_match.start())
+
+        # Skip Riverpod framework classes — they legitimately own ref
+        if extends_name and extends_name.startswith('_$'):
+            continue
+        if extends_name and extends_name.startswith('ConsumerState'):
+            continue
+        if extends_name == 'ConsumerWidget':
+            continue
+
+        # Double-check: skip if this position is actually inside a Riverpod class
+        # (e.g. nested class inside a _$ class — unlikely but defensive)
+        preceding = content[:orig_pos]
+        if RE_PROVIDER_CLASS.search(preceding):
+            last_provider = None
+            for m in RE_PROVIDER_CLASS.finditer(preceding):
+                last_provider = m
+            if last_provider:
+                brace_pos = content.find('{', last_provider.end())
+                if brace_pos != -1:
+                    provider_end = find_matching_brace(content, brace_pos + 1)
+                    if orig_pos < provider_end:
+                        continue
+
+        # Find class body boundaries in ORIGINAL content (for accurate line numbers)
+        brace_pos = content.find('{', orig_pos)
+        if brace_pos == -1:
+            continue
+        class_end = find_matching_brace(content, brace_pos + 1)
+        class_body = content[orig_pos:class_end + 1]
+        class_start_offset = orig_pos
+
+        # Check for Ref field in this class body
+        for ref_match in RE_REF_FIELD_STORAGE.finditer(class_body):
+            field_name = ref_match.group(1)
+            abs_line = content[:class_start_offset + ref_match.start()].count('\n') + 1
+
+            snippet = extract_snippet(lines, abs_line, before=2, after=3)
+
+            violations.append(Violation(
+                file_path=str(file_path),
+                class_name=class_name,
+                violation_type=ViolationType.REF_STORED_AS_FIELD,
+                line_number=abs_line,
+                context=(
+                    f"Ref stored as field '{field_name}' in plain class "
+                    f"{class_name} — crashes when provider disposes during "
+                    f"async operations (UnmountedRefException)"
+                ),
+                code_snippet=snippet,
+                fix_instructions=f"""CRITICAL: Storing Ref as a field in a plain Dart class is forbidden.
+
+When the creating provider disposes (auto-dispose, user navigates away),
+the stored Ref becomes invalid. Any subsequent ref.read()/ref.watch() call
+crashes with UnmountedRefException.
+
+PRODUCTION CRASH: Sentry UnmountedRefException on {class_name}
+
+WHY THIS HAPPENS:
+  @riverpod  // auto-dispose
+  {class_name} create{class_name}(Ref ref) {{
+    return {class_name}(ref: ref);  // Ref stored in plain class
+  }}
+
+  // Later, provider disposes, but class still holds dead Ref:
+  class {class_name} {{
+    final Ref {field_name};  // <-- DEAD after provider disposal
+
+    Future<void> doWork() async {{
+      await operation();
+      {field_name}.read(provider);  // CRASH: UnmountedRefException
+    }}
+  }}
+
+FIX: Inject specific dependencies, not Ref:
+
+  class {class_name} {{
+    final MyService _service;      // Inject what you need
+    final UnifiedLogger _logger;   // Not Ref itself
+
+    {class_name}({{
+      required MyService service,
+      required UnifiedLogger logger,
+    }}) : _service = service, _logger = logger;
+  }}
+
+  @riverpod
+  {class_name} create{class_name}(Ref ref) {{
+    return {class_name}(
+      service: ref.watch(myServiceProvider),
+      logger: ref.read(unifiedLoggerProvider),
+    );
+  }}
+
+Reference: Riverpod async safety — never pass or store Ref in plain classes.
+https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+            ))
+
+            # One violation per class is sufficient — break after first Ref field
+            break
 
     return violations

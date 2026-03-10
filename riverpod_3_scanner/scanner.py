@@ -6,7 +6,7 @@ Comprehensive static analysis tool for Flutter/Dart projects using Riverpod 3.0+
 Author: Steven Day
 Company: DayLight Creative Technologies
 License: MIT
-Version: 1.4.1
+Version: 1.5.0
 
 Detects ALL forbidden patterns that violate Riverpod 3.0 async safety standards.
 
@@ -15,7 +15,7 @@ SCANS THREE CLASS TYPES:
 - ConsumerStatefulWidget State classes (extends ConsumerState<T>)
 - ConsumerWidget classes (extends ConsumerWidget)
 
-FORBIDDEN PATTERNS DETECTED (15 TYPES):
+FORBIDDEN PATTERNS DETECTED (16 TYPES):
 
 CRITICAL (Will crash in production):
 1. Field caching (nullable/dynamic fields with getters in async classes)
@@ -28,6 +28,7 @@ CRITICAL (Will crash in production):
 8. ref operations inside lifecycle callbacks (ref.onDispose, ref.listen)
 9. initState field access before caching (accessing cached fields before build() caches them)
 10. Sync methods with ref.read() but no mounted check (called from async context)
+11. Ref stored as field in plain Dart class (not Riverpod notifier/widget)
 
 WARNINGS (High risk of crashes):
 11. Widget lifecycle methods with unsafe ref (didUpdateWidget, deactivate, reassemble)
@@ -90,6 +91,7 @@ from .checkers import (
     check_untyped_lazy_getters,
     check_mounted_confusion,
     check_initstate_field_access,
+    check_ref_stored_as_field,
 )
 from .output import format_violation_text, print_summary_text, format_json
 
@@ -250,6 +252,9 @@ class RiverpodScanner:
 
             violations.extend(check_async_event_handlers(ctx))
             violations.extend(check_deferred_callbacks(ctx))
+
+        # --- Any class storing Ref as field (forbidden in plain classes) ---
+        violations.extend(check_ref_stored_as_field(file_path, content, lines))
 
         # Filter suppressed violations
         suppressed = []

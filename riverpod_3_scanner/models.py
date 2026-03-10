@@ -34,6 +34,7 @@ class ViolationType(Enum):
     MOUNTED_VS_REF_MOUNTED_CONFUSION = "mounted_vs_ref_mounted_confusion"
     INITSTATE_FIELD_ACCESS_BEFORE_CACHING = "initstate_field_access_before_caching"
     SYNC_METHOD_WITHOUT_MOUNTED_CHECK = "sync_method_without_mounted_check"
+    REF_STORED_AS_FIELD = "ref_stored_as_field"
 
 
 VIOLATION_SEVERITY = {
@@ -53,6 +54,7 @@ VIOLATION_SEVERITY = {
     ViolationType.MOUNTED_VS_REF_MOUNTED_CONFUSION: Severity.DEFENSIVE,
     ViolationType.INITSTATE_FIELD_ACCESS_BEFORE_CACHING: Severity.CRITICAL,
     ViolationType.SYNC_METHOD_WITHOUT_MOUNTED_CHECK: Severity.CRITICAL,
+    ViolationType.REF_STORED_AS_FIELD: Severity.CRITICAL,
 }
 
 

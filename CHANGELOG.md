@@ -5,6 +5,53 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-03-10
+
+### Added
+
+- **CRITICAL**: New violation type — `REF_STORED_AS_FIELD` (Violation Type #17)
+  - Detects `final Ref ref;` fields in plain Dart classes (not Riverpod notifiers/widgets)
+  - Scans ALL classes in every file, not just the 3 Riverpod class types
+  - Skips classes extending `_$*` (Riverpod notifiers), `ConsumerState`, or `ConsumerWidget` — these legitimately own `ref`
+  - One violation reported per class (not per usage)
+  - **Production Impact**: Detected Sentry `UnmountedRefException` on `activePromoEntitlementRemoteDataSourceProvider` — Pixel 7a, Android 16, production build 15.3.6
+
+### Why This Check Was Needed
+
+The scanner previously only analyzed 3 class types (Riverpod notifiers, ConsumerState, ConsumerWidget). Plain Dart classes that store `Ref` as a field were completely invisible. This is a common pattern in datasource layers where `Ref` is passed via constructor:
+
+```dart
+// DETECTED (plain class storing Ref — auto-dispose crash risk):
+class MyRemoteDataSource {
+  final Ref ref;  // ← VIOLATION: Ref stored as field
+
+  Future<void> fetchData() async {
+    await operation();
+    ref.read(provider);  // CRASH: UnmountedRefException
+  }
+}
+
+// NOT FLAGGED (Riverpod notifier — framework manages Ref):
+class MyNotifier extends _$MyNotifier {
+  // ref is provided by framework — safe
+}
+```
+
+### Technical Details
+
+- Comment-aware detection: Uses `strip_comments()` to prevent matching `class` inside doc comments (e.g., `/// implementation class for auth` would otherwise match `class for`)
+- Keyword blocklist prevents Dart keywords (`for`, `if`, `return`, etc.) from being treated as class names after comment stripping
+- Position mapping: Finds class declarations in stripped content, maps back to original content for accurate line numbers and class body extraction
+- Handles all Dart 3 class modifiers: `abstract`, `sealed`, `final`, `base`, `interface`, `mixin class`
+- Regex pattern: `(?:@override\s+)?(?:late\s+)?final\s+Ref\b\s+(\w+)\s*;`
+
+### Validation
+- Tested on SocialScoreKeeper production codebase (2,461+ Dart files)
+- Found 51 violations across 46 files (29 remote datasources, 10 resumable services, 12 wiring bridges)
+- Zero false positives (comment-in-class-declaration edge case resolved)
+- Zero duplicates (one violation per class enforced via `break`)
+- All existing checks unaffected (0 regressions)
+
 ## [1.4.1] - 2026-02-18
 
 ### Fixed
@@ -564,6 +611,7 @@ requiresGameCompletion: (gameId, homeScore, awayScore) async {
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.5.0 | 2026-03-10 | New violation: REF_STORED_AS_FIELD — detects Ref stored in plain classes |
 | 1.4.1 | 2026-02-18 | Critical class boundary fix, position mapping fix, dedup fix, ConsumerWidget regex fix |
 | 1.4.0 | 2026-02-18 | Modular architecture, JSON output, inline suppression, FileCache, string-aware parsing |
 | 1.3.1 | 2026-01-30 | False positive fix for addPostFrameCallback, mounted pattern recognition |
@@ -606,6 +654,7 @@ python3 riverpod_3_scanner.py lib
 
 ---
 
+[1.5.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.5.0
 [1.4.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.4.1
 [1.4.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.4.0
 [1.3.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.3.1

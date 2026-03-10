@@ -104,6 +104,16 @@ RE_WIDGET_HELPER = re.compile(
     r'Widget\s+(_\w+)\s*\([^)]*\)\s*\{', re.DOTALL
 )
 
+# Ref stored as field in plain class (not Riverpod notifier)
+RE_REF_FIELD_STORAGE = re.compile(
+    r'(?:@override\s+)?(?:late\s+)?final\s+Ref\b\s+(\w+)\s*;',
+)
+RE_ANY_CLASS_DECL = re.compile(
+    r'(?:(?:abstract|sealed|final|base|interface|mixin)\s+)*'
+    r'class\s+(\w+)'
+    r'(?:\s+extends\s+(\w+)(?:<[^>]+>)?)?',
+)
+
 # Suppression comment patterns
 RE_IGNORE_LINE = re.compile(r'//\s*riverpod_scanner:ignore\b')
 RE_IGNORE_FILE = re.compile(r'//\s*riverpod_scanner:ignore-file\b')
