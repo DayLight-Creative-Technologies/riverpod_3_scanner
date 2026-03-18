@@ -5,6 +5,37 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-03-17
+
+### Fixed
+
+- **CRITICAL**: Violation 6 (catch block detection) now detects `state =`, `state.`, and `ref.invalidate*` as ref-equivalent operations
+  - Previously only detected `ref.(read|watch|listen)` — missed `state = AsyncError(e, stack)` and `ref.invalidateSelf()` in catch blocks without `ref.mounted` guard
+  - **Gap discovered by**: Sentry bug #3 (`UnmountedRefException` in `gameProvider`) — `GameNotifier` had multiple async methods with `state =` in catch blocks, all undetected by the scanner
+  - **Irony**: Violation 5 (after-await check) already handled both patterns correctly via `has_significant_code_after_await()` — Violation 6 was simply never updated to match
+  - Pattern match now mirrors Violation 5: `ref.(read|watch|listen|invalidate)` + `\bstate\s*[.=]`
+
+### Added
+
+- **CRITICAL**: New violation type — `STATE_ASSIGN_AWAIT` (Violation Type #18)
+  - Detects `state = await expr` pattern where the `state =` assignment executes after the `await` completes — but the provider may have unmounted during the await
+  - This pattern evades Violation 5 because the `state =` is on the same line as the `await`, not in the "next lines" that `has_significant_code_after_await()` checks
+  - Fix requires restructuring: `final result = await expr; if (!ref.mounted) return; state = result;`
+  - Common in: `state = await AsyncValue.guard(...)`, `state = await ref.read(provider.future)`
+
+### Test Fixtures
+
+- Added `tests/fixtures/` directory with 4 Dart test files:
+  - `catch_block_violations.dart` — 3 violation patterns (state=, ref.invalidate, state.)
+  - `catch_block_passing.dart` — 3 passing patterns (all with proper mounted guards)
+  - `state_assign_await_violations.dart` — 2 violation patterns (AsyncValue.guard, provider.future)
+  - `state_assign_await_passing.dart` — 2 passing patterns (restructured with intermediate variable)
+
+### Validation
+- Tested on SocialScoreKeeper production codebase (2,461+ Dart files) — 0 violations (bugs already fixed in code)
+- Test fixtures detect all bad patterns, pass all good patterns
+- All existing checks unaffected (0 regressions)
+
 ## [1.5.0] - 2026-03-10
 
 ### Added
@@ -611,6 +642,7 @@ requiresGameCompletion: (gameId, homeScore, awayScore) async {
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.6.0 | 2026-03-17 | Catch block detection gap closed (state=, ref.invalidate), new STATE_ASSIGN_AWAIT violation |
 | 1.5.0 | 2026-03-10 | New violation: REF_STORED_AS_FIELD — detects Ref stored in plain classes |
 | 1.4.1 | 2026-02-18 | Critical class boundary fix, position mapping fix, dedup fix, ConsumerWidget regex fix |
 | 1.4.0 | 2026-02-18 | Modular architecture, JSON output, inline suppression, FileCache, string-aware parsing |
@@ -654,6 +686,7 @@ python3 riverpod_3_scanner.py lib
 
 ---
 
+[1.6.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.6.0
 [1.5.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.5.0
 [1.4.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.4.1
 [1.4.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.4.0

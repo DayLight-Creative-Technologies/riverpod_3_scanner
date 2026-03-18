@@ -151,6 +151,19 @@ def _get_missing_mounted_in_catch_fix() -> str:
    }"""
 
 
+def _get_state_assign_await_fix() -> str:
+    """Get fix instructions for state = await pattern."""
+    return """Separate the await from the state assignment with a mounted check:
+
+   BEFORE (unsafe):
+     state = await AsyncValue.guard(() => fetchData());
+
+   AFTER (safe):
+     final result = await AsyncValue.guard(() => fetchData());
+     if (!ref.mounted) return;
+     state = result;"""
+
+
 def _get_ref_in_lifecycle_fix(
     ref_or_method: str,
     is_direct: bool = True,
@@ -555,6 +568,28 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
             if re.search(r'\breturn\s+await\s+', current_line):
                 continue
 
+            # ---- VIOLATION 5b: state = await pattern ----
+            # `state = await expr` is a single expression where the state assignment
+            # happens after the await completes — but the widget/provider may have
+            # unmounted during the await. Requires restructuring:
+            #   final result = await expr; if (!ref.mounted) return; state = result;
+            if re.search(r'\bstate\s*=\s*await\s+', current_line):
+                abs_line = full_content[:class_start + method_start + await_match.start()].count('\n') + 1
+                snippet_start = max(0, abs_line - 1)
+                snippet_end = min(len(lines), abs_line + 5)
+                snippet = '\n'.join(f"  {i + 1:4d} | {lines[i]}" for i in range(snippet_start, snippet_end))
+
+                violations.append(Violation(
+                    file_path=str(ctx.file_path),
+                    class_name=ctx.class_name,
+                    violation_type=ViolationType.STATE_ASSIGN_AWAIT,
+                    line_number=abs_line,
+                    context=f"Method {method_name}(): state assigned directly from await expression",
+                    code_snippet=snippet,
+                    fix_instructions=_get_state_assign_await_fix(),
+                ))
+                continue
+
             remaining_lines = method_lines[await_line_num + 1:await_line_num + 26]
             next_lines_str = '\n'.join(remaining_lines)
 
@@ -586,9 +621,10 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
 
             catch_first_lines = '\n'.join(catch_body.split('\n')[:5])
             has_mounted = re.search(mounted_pattern, catch_first_lines)
-            has_ref_usage = re.search(r'ref\.(read|watch|listen)', catch_first_lines)
+            has_ref_usage = re.search(r'ref\.(read|watch|listen|invalidate)', catch_first_lines)
+            has_state_usage = re.search(r'\bstate\s*[.=]', catch_first_lines)
 
-            if has_ref_usage and not has_mounted:
+            if (has_ref_usage or has_state_usage) and not has_mounted:
                 abs_line = full_content[:class_start + method_start + catch_match.start()].count('\n') + 1
                 snippet_start = max(0, abs_line - 1)
                 snippet_end = min(len(lines), abs_line + 8)
