@@ -124,14 +124,14 @@ def _get_async_getter_fix(field_name: str) -> str:
 
 
 def _get_ref_read_before_mounted_fix() -> str:
-    """Get fix instructions for ref operation before mounted check."""
-    return """Add at method entry BEFORE any ref operation (read/watch/listen):
+    """Get fix instructions for ref/state operation before mounted check."""
+    return """Add at method entry BEFORE any ref operation or state access:
    if (!ref.mounted) return;
    final dep = ref.read(provider);
-   // OR
-   ref.watch(someProvider);
-   // OR
-   ref.listen(someProvider, (prev, next) { ... });"""
+   state = state.copyWith(...);
+
+Both ref.read() and state access throw UnmountedRefException on disposed providers.
+Sentry: FLUTTER-950, FLUTTER-951, FLUTTER-952."""
 
 
 def _get_missing_mounted_after_await_fix() -> str:
@@ -510,8 +510,11 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         mounted_pattern = r'if\s*\(\s*!ref\.mounted\s*\)'
 
     for method_name in ctx.async_methods:
+        # Use .+? (non-greedy any char) instead of [^>]+ to handle nested
+        # generics like Future<Either<Failure, void>>. The [^>]+ pattern fails
+        # on nested types because it stops at the first > inside the generic.
         method_pattern = re.compile(
-            rf'(?:Future<[^>]+>|FutureOr<[^>]+>|Stream<[^>]+>)\s+{method_name}\s*\([^)]*\)\s+async\*?\s*\{{',
+            rf'(?:Future<.+?>|FutureOr<.+?>|Stream<.+?>)\s+{method_name}\s*\([^)]*\)\s+async\*?\s*\{{',
             re.DOTALL,
         )
         method_match = method_pattern.search(class_content)
@@ -524,15 +527,39 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         method_body = class_content[method_start:method_end]
         method_lines = method_body.split('\n')
 
-        # ---- VIOLATION 4: ref operation before mounted check ----
+        # ---- VIOLATION 4: ref/state operation before mounted check ----
         first_10_lines = '\n'.join(method_lines[:10])
         first_10_lines_no_comments = remove_comments(first_10_lines)
 
-        has_early_mounted = re.search(mounted_pattern, first_10_lines_no_comments)
         ref_operation_match = re.search(r'ref\.(read|watch|listen)\(', first_10_lines_no_comments)
 
-        if ref_operation_match and not has_early_mounted:
-            operation_name = ref_operation_match.group(1)
+        # Also detect state access (state = or state.) as ref-equivalent.
+        # Accessing `state` on a disposed notifier throws UnmountedRefException.
+        # Skip build() — its return value IS the state; state= is not used early.
+        state_access_match = None
+        if method_name != 'build' and not ctx.is_consumer_state:
+            state_access_match = re.search(r'\bstate\s*[.=]', first_10_lines_no_comments)
+
+        # Find the earliest ref-equivalent operation position
+        first_operation_pos = None
+        if ref_operation_match:
+            first_operation_pos = ref_operation_match.start()
+        if state_access_match:
+            if first_operation_pos is None or state_access_match.start() < first_operation_pos:
+                first_operation_pos = state_access_match.start()
+
+        # Mounted check must appear BEFORE the first operation to be protective
+        has_mounted_before_operation = False
+        if first_operation_pos is not None:
+            mounted_match = re.search(mounted_pattern, first_10_lines_no_comments)
+            if mounted_match and mounted_match.start() < first_operation_pos:
+                has_mounted_before_operation = True
+
+        if (ref_operation_match or state_access_match) and not has_mounted_before_operation:
+            if ref_operation_match:
+                operation_name = f"ref.{ref_operation_match.group(1)}()"
+            else:
+                operation_name = "state access"
             abs_line = full_content[:class_start + method_start].count('\n') + 2
             snippet_start = max(0, abs_line - 1)
             snippet_end = min(len(lines), abs_line + 5)
@@ -543,7 +570,7 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
                 class_name=ctx.class_name,
                 violation_type=ViolationType.REF_READ_BEFORE_MOUNTED,
                 line_number=abs_line,
-                context=f"Method {method_name}(): ref.{operation_name}() before mounted check",
+                context=f"Method {method_name}(): {operation_name} before mounted check",
                 code_snippet=snippet,
                 fix_instructions=_get_ref_read_before_mounted_fix(),
             ))
@@ -647,10 +674,15 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
 # CHECKER 3: check_sync_methods_without_mounted
 # ===========================================================================
 
-def _find_sync_methods_with_ref_read(
+def _find_sync_methods_with_ref_operations(
     class_content: str, is_consumer_state: bool = False
 ) -> List[Tuple[str, int, str]]:
-    """Find sync methods (non-async) that use ref.read() without mounted checks.
+    """Find sync methods (non-async) that use ref.read() or state access without mounted checks.
+
+    Detects two ref-equivalent operation types:
+    - ref.read() — explicit ref operation
+    - state access (state = or state.) — implicit ref operation on notifiers
+      (accessing `state` on a disposed notifier throws UnmountedRefException)
 
     Returns: List of (method_name, line_offset, method_body).
     """
@@ -681,14 +713,29 @@ def _find_sync_methods_with_ref_read(
         if re.search(r'\basync\b', full_signature):
             continue
 
+        # Find ref.read() operations
         ref_read_matches = list(re.finditer(r'ref\.read\(', method_body))
-        if not ref_read_matches:
+
+        # Find state access operations (state = or state.)
+        # Only for notifier classes (not ConsumerState widgets)
+        state_access_matches = []
+        if not is_consumer_state:
+            state_access_matches = list(re.finditer(r'\bstate\s*[.=]', method_body))
+
+        if not ref_read_matches and not state_access_matches:
             continue
 
-        first_ref_read_pos = ref_read_matches[0].start()
+        # Find earliest ref-equivalent operation
+        all_positions = []
+        for m in ref_read_matches:
+            all_positions.append(m.start())
+        for m in state_access_matches:
+            all_positions.append(m.start())
 
-        before_first_ref_read = method_body[:first_ref_read_pos]
-        has_mounted_check = re.search(mounted_pattern, before_first_ref_read)
+        first_operation_pos = min(all_positions)
+
+        before_first_operation = method_body[:first_operation_pos]
+        has_mounted_check = re.search(mounted_pattern, before_first_operation)
 
         if not has_mounted_check:
             line_offset = class_content[:method_match.start()].count('\n')
@@ -704,7 +751,7 @@ def check_sync_methods_without_mounted(ctx: CheckContext) -> List[Violation]:
     """
     violations: List[Violation] = []
 
-    sync_methods = _find_sync_methods_with_ref_read(ctx.class_content, ctx.is_consumer_state)
+    sync_methods = _find_sync_methods_with_ref_operations(ctx.class_content, ctx.is_consumer_state)
 
     for method_name, line_offset, method_body in sync_methods:
         method_key = (str(ctx.file_path), ctx.class_name, method_name)
@@ -1832,8 +1879,9 @@ def check_mounted_confusion(ctx: CheckContext) -> List[Violation]:
     violations: List[Violation] = []
 
     for method_name in ctx.async_methods:
+        # Use .+? (non-greedy) for nested generic support (e.g. Future<Either<A, B>>)
         method_pattern = re.compile(
-            rf'(?:Future<[^>]+>|FutureOr<[^>]+>|Stream<[^>]+>)\s+{method_name}\s*\([^)]*\)\s+async\*?\s*\{{',
+            rf'(?:Future<.+?>|FutureOr<.+?>|Stream<.+?>)\s+{method_name}\s*\([^)]*\)\s+async\*?\s*\{{',
             re.DOTALL,
         )
         method_match = method_pattern.search(ctx.class_content)
@@ -2090,7 +2138,7 @@ See also: Flutter widget lifecycle documentation""",
         # Check methods called from initState to see if they use the getter
         for method_name in called_methods:
             method_pattern = re.compile(
-                rf'(?:Future<[^>]*>|void)\s+{method_name}\s*\([^)]*\)\s+(?:async\s+)?\{{',
+                rf'(?:Future<.+?>|void)\s+{method_name}\s*\([^)]*\)\s+(?:async\s+)?\{{',
                 re.DOTALL,
             )
             method_match = method_pattern.search(ctx.class_content)
@@ -2336,3 +2384,5 @@ https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/G
             break
 
     return violations
+
+

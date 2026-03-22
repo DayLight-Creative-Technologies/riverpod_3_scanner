@@ -331,8 +331,9 @@ def _trace_async_method_calls(
 ) -> None:
     """Find all method calls inside async methods (after await statements)."""
     # Find all async methods (including FutureOr for Riverpod build methods)
+    # Use .+? (non-greedy) for nested generic support (e.g. Future<Either<A, B>>)
     async_pattern = re.compile(
-        r'(?:Future<[^>]+>|FutureOr<[^>]+>|Stream<[^>]+>)\s+(\w+)\s*\([^)]*\)\s*async\s*\{',
+        r'(?:Future<.+?>|FutureOr<.+?>|Stream<.+?>)\s+(\w+)\s*\([^)]*\)\s*async\s*\{',
         re.DOTALL,
     )
 

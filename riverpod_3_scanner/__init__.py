@@ -10,7 +10,7 @@ License: MIT
 from .models import ViolationType, Violation, Severity, VIOLATION_SEVERITY
 from .scanner import RiverpodScanner
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 __author__ = "Steven Day"
 __email__ = "support@daylightcreative.tech"
 __license__ = "MIT"

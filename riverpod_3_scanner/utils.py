@@ -40,8 +40,9 @@ RE_ASYNC_STREAM = re.compile(
 )
 
 # General method pattern (both sync and async)
+# Use .+? (non-greedy) for nested generic support (e.g. Future<Either<A, B>>)
 RE_METHOD = re.compile(
-    r'(?:Future<[^>]+>|Stream<[^>]+>|void|bool|String|int|double|num|\w+\?)'
+    r'(?:Future<.+?>|Stream<.+?>|void|bool|String|int|double|num|\w+\?)'
     r'\s+(\w+)\s*\([^)]*\)\s*(?:async\s*)?\{',
     re.DOTALL,
 )
@@ -571,8 +572,9 @@ def find_methods_using_ref(class_content: str) -> Set[str]:
     methods_with_ref: Set[str] = set()
 
     # Match methods including FutureOr for Riverpod build methods
+    # Use .+? (non-greedy) for nested generic support (e.g. Future<Either<A, B>>)
     method_pattern = re.compile(
-        r'(?:Future<[^>]+>|FutureOr<[^>]+>|void|[A-Z]\w+)'
+        r'(?:Future<.+?>|FutureOr<.+?>|void|[A-Z]\w+)'
         r'\s+(\w+)\s*\([^)]*\)\s*(?:async\s*)?\{'
     )
 

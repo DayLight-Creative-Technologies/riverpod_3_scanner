@@ -5,6 +5,48 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-03-21
+
+### Fixed
+
+- **CRITICAL**: Nested generic return types (`Future<Either<A, B>>`) now detected correctly across all scanners
+  - 6 regex patterns used `[^>]+` which fails on nested generics — the pattern stops at the first `>` inside `Either<A, B>>`
+  - Fixed to use `.+?` (non-greedy any-char) matching `RE_ASYNC_FUTURE` pattern that already worked correctly
+  - **Affected scanners**: Violation 4 (entry guard), Violation 5 (after-await), Violation 6 (catch block), cross-file async callback tracing (Pass 2), `RE_METHOD`, `find_methods_using_ref`
+  - **Production impact**: 100+ async methods returning `Future<Either<Failure, T>>` were completely invisible to all violation checks. Includes all sport notifier methods (baseball, basketball, football, lacrosse, soccer, volleyball)
+  - **Gap discovered by**: Sentry FLUTTER-950/951 (`UnmountedRefException` on `baseballProvider` and `baseballControlsProvider`) — `completeGame()` returning `Future<Either<ScoreboardFailure, void>>` was never scanned
+
+- **CRITICAL**: Violation 4 (entry guard check) now enforces ordering — mounted check must appear BEFORE first ref/state operation
+  - Previously checked if ANY mounted pattern existed in first 10 lines, regardless of position
+  - Now verifies `mounted_match.start() < first_operation_pos` — a mounted check at line 8 does not protect state access at line 2
+
+### Added
+
+- **CRITICAL**: `state` access (get and set) now treated as ref-equivalent operation in Violation 4 (entry guard)
+  - Accessing `state` on a disposed Riverpod notifier throws `UnmountedRefException` — identical to `ref.read()`
+  - Detects `state =` (assignment) and `state.` (property access) in the first 10 lines of async methods
+  - Excludes `build()` methods (framework guarantees provider is alive) and `ConsumerState` classes (different state semantics)
+  - **Gap discovered by**: Sentry FLUTTER-951 (`completeGame()` does `state = state.copyWith(isComplete: true)` as first line, no mounted check)
+
+- **CRITICAL**: Sync method checker (`_find_sync_methods_with_ref_operations`) now detects `state` access
+  - Previously only detected `ref.read()` — renamed from `_find_sync_methods_with_ref_read`
+  - Now also flags sync methods that access `state` (assignment or property) without mounted guard
+  - Only applies to notifier classes (not `ConsumerState` widgets where `state` is a different API)
+  - Finds earliest ref-equivalent operation (ref.read OR state access) and checks for mounted guard before it
+  - **Gap discovered by**: Sentry FLUTTER-952 (`clearDuplicateDetection()` only does `state = state.copyWith(...)`, no ref.read at all)
+
+### Test Fixtures
+
+- Added `tests/fixtures/state_access_violations.dart` — 3 patterns (sync state set, async state before mounted, sync state.property)
+- Added `tests/fixtures/state_access_passing.dart` — 3 passing patterns (mounted guard, build() method)
+
+### Validation
+- Tested on SocialScoreKeeper production codebase (2,461+ Dart files) — 197 violations found (previously 0 due to nested generic blindness)
+- Breakdown: 82 REF_READ_BEFORE_MOUNTED, 5 MISSING_MOUNTED_AFTER_AWAIT, 60 MISSING_MOUNTED_IN_CATCH, 50 SYNC_METHOD_WITHOUT_MOUNTED_CHECK
+- All 3 Sentry crash methods now detected: `completeGame()`, `cancelDialog()` (via call-graph), `clearDuplicateDetection()` (via call-graph for similar methods)
+- All existing test fixtures pass (0 regressions)
+- All new passing fixtures clean (0 false positives)
+
 ## [1.6.0] - 2026-03-17
 
 ### Fixed
@@ -642,6 +684,7 @@ requiresGameCompletion: (gameId, homeScore, awayScore) async {
 
 | Version | Date | Key Changes |
 |---------|------|-------------|
+| 1.7.0 | 2026-03-21 | Nested generic fix (Future<Either<A,B>>), state access as ref-equivalent, entry guard ordering |
 | 1.6.0 | 2026-03-17 | Catch block detection gap closed (state=, ref.invalidate), new STATE_ASSIGN_AWAIT violation |
 | 1.5.0 | 2026-03-10 | New violation: REF_STORED_AS_FIELD — detects Ref stored in plain classes |
 | 1.4.1 | 2026-02-18 | Critical class boundary fix, position mapping fix, dedup fix, ConsumerWidget regex fix |
@@ -686,6 +729,7 @@ python3 riverpod_3_scanner.py lib
 
 ---
 
+[1.7.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.7.0
 [1.6.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.6.0
 [1.5.0]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.5.0
 [1.4.1]: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/releases/tag/v1.4.1
