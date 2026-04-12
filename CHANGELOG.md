@@ -5,6 +5,36 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-04-12
+
+### Added
+
+- **Field caching — null-asserted getter variant (`FIELD_CACHING`)**: Detects the `Type get name => _field!;` pattern that evaded every existing `check_field_caching` sync_getter_pattern because none allowed a trailing `!` before the semicolon.
+  - Real-world origin: `lib/presentation/features/game/views/game_gallery_view.dart` in the SocialScoreKeeper codebase — a self-flagged violation (code had `// ❌ RIVERPOD 3.0 VIOLATION` comments) that the scanner never caught.
+  - **Zero-false-positive design**: requires ALL 4 signals present simultaneously before flagging:
+    1. Class has async methods (`ctx.has_async_methods`)
+    2. Nullable field declared: `TypeName? _fieldName;`
+    3. Bang getter returns field: `TypeName get fieldName => _fieldName!;`
+    4. Field is `ref.read`-backed: `_fieldName ??= ref.read(...)` OR `_fieldName = ref.read(...)` anywhere in the class
+  - Signal #4 is the critical FP guard: it proves the field is actually Riverpod-cached rather than a generic nullable that happens to use a bang getter.
+  - Deduplicated against existing bang-less patterns (`=> _field;`) to avoid double-flagging.
+
+### Test Fixtures
+
+- Added `tests/fixtures/field_caching_bang_violations.dart` — 2 positive patterns (`??=` assign in `build()`, `=` assign in `initState`)
+- Added `tests/fixtures/field_caching_bang_passing.dart` — 4 negative patterns that must NOT be flagged:
+  - Case A: bang getter + nullable field, but NO `ref.read` assignment (non-Riverpod nullable)
+  - Case B: `ref.read` exists but no field/getter pair
+  - Case C: sync-only class (no async methods) — lazy getters are framework-safe here
+  - Case D: `!` applied to a local variable, not a field
+- All 4 negative cases verified: **0 field-caching violations flagged**.
+
+### Validation
+
+- Tested on SocialScoreKeeper production codebase (2,461+ Dart files) — **7 true-positive violations** newly detected across 5 files: `signup_flow.dart`, `game_chat_view.dart`, `unified_queue_monitor_view.dart`, `modal_game_gallery_view.dart`, `game_gallery_view.dart`. Each was manually verified as a genuine bang-getter field-caching pattern with ref.read backing.
+- Zero false positives on the passing fixture corpus.
+- No regressions: all existing detectors unchanged; the new check is an additive block that dedupes against prior matches.
+
 ## [1.7.0] - 2026-03-21
 
 ### Fixed

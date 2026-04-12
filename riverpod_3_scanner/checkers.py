@@ -482,6 +482,80 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
                 ))
                 break
 
+    # ------------------------------------------------------------------
+    # CHECK NULL-ASSERTED FIELD CACHING (BANG-GETTER VARIANT)
+    # Zero-FP guarantee: requires ALL 4 signals present simultaneously.
+    #   1. Class has async methods (via ctx.has_async_methods)
+    #   2. Nullable field declared:   TypeName? _fieldName;
+    #   3. Bang getter returns field: TypeName get fieldName => _fieldName!;
+    #   4. Field is ref.read-backed:  _fieldName ??= ref.read(...)
+    #                              OR _fieldName  =  ref.read(...)
+    # Any missing signal = no flag. The ref.read assignment is the critical
+    # FP guard: it proves the field is actually Riverpod-cached, not just
+    # a generic nullable field that happens to use a bang getter.
+    #
+    # This variant evades every existing sync_getter_pattern because none of
+    # them allow a trailing `!` before the semicolon in `=> _field;`.
+    # Real-world origin: lib/presentation/features/game/views/game_gallery_view.dart
+    # ------------------------------------------------------------------
+    if ctx.has_async_methods:
+        bang_getter_pattern = re.compile(
+            r'(\w+(?:<.+?>)?)\s+get\s+(\w+)\s*=>\s*(_\w+)\s*!\s*;',
+            re.DOTALL,
+        )
+        for getter_match in bang_getter_pattern.finditer(class_content):
+            getter_type = getter_match.group(1)
+            getter_name = getter_match.group(2)
+            field_name = getter_match.group(3)
+
+            # Convention: field is '_' + getter name
+            if field_name != '_' + getter_name:
+                continue
+
+            # Signal 2: nullable field of matching type must exist in class
+            field_decl_pattern = re.compile(
+                rf'{re.escape(getter_type)}\?\s+{re.escape(field_name)}\s*[;=]'
+            )
+            if not field_decl_pattern.search(class_content):
+                continue
+
+            # Signal 4 (FP GUARD): field must be assigned from ref.read() in this class
+            ref_read_assign_pattern = re.compile(
+                rf'{re.escape(field_name)}\s*(?:\?\?=|=)\s*ref\.read\('
+            )
+            if not ref_read_assign_pattern.search(class_content):
+                continue
+
+            abs_getter_line = full_content[:class_start + getter_match.start()].count('\n') + 1
+
+            # Dedupe: skip if an earlier pass already flagged this line
+            if any(
+                v.line_number == abs_getter_line and v.file_path == str(ctx.file_path)
+                for v in violations
+            ):
+                continue
+
+            snippet_start = max(0, abs_getter_line - 1)
+            snippet_end = min(len(lines), abs_getter_line + 4)
+            snippet = '\n'.join(
+                f"  {i + 1:4d} | {lines[i]}" for i in range(snippet_start, snippet_end)
+            )
+
+            violations.append(Violation(
+                file_path=str(ctx.file_path),
+                class_name=ctx.class_name,
+                violation_type=ViolationType.FIELD_CACHING,
+                line_number=abs_getter_line,
+                context=(
+                    f"Field caching: {field_name} — null-asserted lazy getter "
+                    f"backed by ref.read() in async class (crashes on unmount)"
+                ),
+                code_snippet=snippet,
+                fix_instructions=_get_field_caching_fix(
+                    field_name, ctx.async_methods, ctx.is_consumer_state
+                ),
+            ))
+
     return violations
 
 
