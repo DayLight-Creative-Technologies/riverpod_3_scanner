@@ -172,6 +172,13 @@ class RiverpodScanner:
             violations.extend(check_ref_in_lifecycle_callbacks(ctx))
             violations.extend(check_ref_operations_outside_build(ctx))
             violations.extend(check_mounted_confusion(ctx))
+            # Off-frame async (Future.microtask, scheduleMicrotask) applies
+            # to notifier classes too — `ref` inside such a callback is
+            # unsafe without a `ref.mounted` entry guard. Scope restricts
+            # to the two micro-task specs whose detection logic cannot
+            # false-positive on captured-parameter patterns common in
+            # service-class notifiers.
+            violations.extend(check_deferred_callbacks(ctx, notifier_scope=True))
 
         # --- ConsumerStatefulWidget State classes (extends ConsumerState<T>) ---
         for match in RE_CONSUMER_STATE_CLASS.finditer(content):

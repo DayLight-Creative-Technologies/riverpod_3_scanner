@@ -1470,15 +1470,37 @@ class DeferredCallbackSpec:
     fix_instructions: str = ""
 
 
-# Pre-compiled mounted-check patterns
-_MOUNTED_CHECK_BROAD = re.compile(r'if\s*\(\s*!?\s*(ref\.)?\s*mounted\s*\)')
+# Pre-compiled mounted-check patterns.
+#
+# `_MOUNTED_CHECK_BROAD` recognizes EVERY valid mounted-style guard the SSK
+# async-surface taxonomy permits:
+#   - `if (!ref.mounted)` / `if (ref.mounted)` — Notifier `Ref` guard
+#   - `if (!context.mounted)` / `if (context.mounted)` — BuildContext guard
+#     (used in ConsumerWidget / HookConsumerWidget — `WidgetRef` has no
+#     `mounted` getter, so `context.mounted` is the canonical widget gate)
+#   - `if (!mounted)` / `if (mounted)` — `State.mounted` (inherited)
+#   - Any-prefix qualified form: `if (!myCtx.mounted)`, etc.
+#   - Compound guards: `if (!context.mounted || flag)`, `if (mounted && cond)`
+#
+# Closing terminator allows `)`, `&` (for `&&`), `|` (for `||`), `!`, `=`
+# (for `!=` / `==`), and whitespace before any of those.
+_MOUNTED_CHECK_BROAD = re.compile(
+    r'if\s*\(\s*!?\s*(?:[\w.]+\.)?mounted\s*[\s)&|!=]'
+)
+# Stricter widget-only form: `if (!mounted)` / `if (mounted)` exactly.
+# Reserved for callback specs (.then / .catchError / .whenComplete) that
+# historically required State-context guards.
 _MOUNTED_CHECK_WIDGET = re.compile(r'if\s*\(\s*!?mounted\s*\)')
 
-# The six deferred callback specifications
+# The eight deferred-callback specifications.
+#
+# Patterns match both `() {` and `() async {` callback bodies — Riverpod 3.x
+# code commonly uses both shapes. The closing brace search uses
+# `_find_callback_end` which is `async`-agnostic.
 DEFERRED_CALLBACKS = [
     DeferredCallbackSpec(
         name='Future.delayed',
-        pattern=re.compile(r'Future\.delayed\s*\([^)]*\)\s*,\s*\(\)\s*\{'),
+        pattern=re.compile(r'Future\.delayed\s*\([^)]*\)\s*,\s*\(\)\s*(?:async\s+)?\{'),
         severity='WARNING',
         check_getters=False,
         check_method_calls=True,
@@ -1508,7 +1530,7 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
     ),
     DeferredCallbackSpec(
         name='Timer',
-        pattern=re.compile(r'Timer(?:\.periodic)?\s*\([^,]+,\s*\([^)]*\)\s*\{'),
+        pattern=re.compile(r'Timer(?:\.periodic)?\s*\([^,]+,\s*\([^)]*\)\s*(?:async\s+)?\{'),
         severity='WARNING',
         check_getters=False,
         check_method_calls=False,
@@ -1548,7 +1570,7 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
     ),
     DeferredCallbackSpec(
         name='addPostFrameCallback',
-        pattern=re.compile(r'addPostFrameCallback\s*\(\s*\([^)]*\)\s*\{', re.DOTALL),
+        pattern=re.compile(r'addPostFrameCallback\s*\(\s*\([^)]*\)\s*(?:async\s+)?\{', re.DOTALL),
         severity='CRITICAL',
         check_getters=False,
         check_method_calls=False,
@@ -1590,7 +1612,7 @@ Sentry Issue: #7364580c89a044b387aafbb7a997a682 (iOS production crash)""",
         severity='CRITICAL',
         check_getters=True,
         check_method_calls=False,
-        mounted_pattern=_MOUNTED_CHECK_WIDGET,
+        mounted_pattern=_MOUNTED_CHECK_BROAD,
         context_template="CRITICAL: .then() callback without mounted check",
         fix_instructions="""CRITICAL: .then() callbacks MUST check mounted before ref operations
 
@@ -1631,7 +1653,7 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
         severity='CRITICAL',
         check_getters=True,
         check_method_calls=False,
-        mounted_pattern=_MOUNTED_CHECK_WIDGET,
+        mounted_pattern=_MOUNTED_CHECK_BROAD,
         context_template="CRITICAL: .catchError() callback without mounted check",
         fix_instructions="""CRITICAL: .catchError() callbacks MUST check mounted before ref operations
 
@@ -1656,11 +1678,11 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
     ),
     DeferredCallbackSpec(
         name='.whenComplete()',
-        pattern=re.compile(r'\.whenComplete\s*\(\s*\([^)]*\)\s*\{', re.DOTALL),
+        pattern=re.compile(r'\.whenComplete\s*\(\s*\([^)]*\)\s*(?:async\s+)?\{', re.DOTALL),
         severity='CRITICAL',
         check_getters=True,
         check_method_calls=False,
-        mounted_pattern=_MOUNTED_CHECK_WIDGET,
+        mounted_pattern=_MOUNTED_CHECK_BROAD,
         context_template="CRITICAL: .whenComplete() callback without mounted check",
         fix_instructions="""CRITICAL: .whenComplete() callbacks MUST check mounted before ref operations
 
@@ -1682,60 +1704,268 @@ AFTER (SAFE):
 
 Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
     ),
+    DeferredCallbackSpec(
+        name='Future.microtask',
+        pattern=re.compile(r'Future\.microtask\s*\(\s*\(\s*\)\s*(?:async\s+)?\{', re.DOTALL),
+        severity='CRITICAL',
+        # Pre-capture-then-microtask is the canonical SAFE pattern for
+        # crossing the schedule/fire gap (presentation-layer.md). A microtask
+        # whose body uses ONLY pre-captured locals (whether passed as method
+        # parameters, captured by the closure, or pre-read via `final x =
+        # ref.read(...)` BEFORE the microtask is scheduled) holds zero
+        # ref-after-unmount risk. Three notes on detector design:
+        #
+        # 1. `check_getters=False` — the lazy-getter regex
+        #    `[a-z][a-zA-Z]*Notifier\.` cannot distinguish `myNotifier.foo()`
+        #    (captured local) from `_myNotifier.foo()` (lazy getter that
+        #    reads ref). The class-level lazy-getter checker catches the
+        #    real violation at declaration site, so we don't lose coverage.
+        #
+        # 2. `check_method_calls=False` — the canonical pattern
+        #    `Future.microtask(() async { _handlePasswordRecovery(captured); })`
+        #    is intentionally unflagged. The risk lives in `ref.*` access
+        #    inside the callback, not in dispatch.
+        #
+        # The remaining detection — `ref.(read|watch|listen)\(` directly in
+        # the body — is the exact 9CJ shape and is the only real catch we
+        # need.
+        check_getters=False,
+        check_method_calls=False,
+        mounted_pattern=_MOUNTED_CHECK_BROAD,
+        context_template="CRITICAL: Future.microtask callback without mounted check before ref usage",
+        fix_instructions="""CRITICAL: Future.microtask callbacks MUST check mounted before ref operations
+
+❌ PROBLEM: Microtask runs on the next event-loop turn — by then the host
+   widget or notifier may be disposed. The schedule-site outer guard does
+   NOT protect the callback body. Calling `ref.read(...)` from an unmounted
+   widget's `WidgetRef` throws:
+       "Bad state: Using \\"ref\\" when a widget is about to or has been
+        unmounted is unsafe."
+   This is the exact shape of Sentry SOCIALSCOREKEEPER-FLUTTER-9CJ.
+
+✅ FIX: Re-guard inside the callback at entry, plus after every await.
+
+BEFORE (CRASHES — Sentry 9CJ):
+   useEffect(() {
+     Future.microtask(() async {
+       final logger = ref.read(unifiedLoggerProvider);  // ❌ may be unmounted
+       try {
+         final prefs = await SharedPreferences.getInstance();
+         await prefs.setBool('seen', true);
+         ref.read(notifier.notifier).markStep();        // ❌ may be unmounted
+       } catch (e) {
+         logger.logError('Failed', error: e);            // ❌ may be unmounted
+       }
+     });
+     return null;
+   }, []);
+
+AFTER (SAFE):
+   useEffect(() {
+     Future.microtask(() async {
+       if (!context.mounted) return;                     // entry guard
+       final logger = ref.read(unifiedLoggerProvider);
+       try {
+         final prefs = await SharedPreferences.getInstance();
+         if (!context.mounted) return;                   // after every await
+         await prefs.setBool('seen', true);
+         if (!context.mounted) return;
+         ref.read(notifier.notifier).markStep();
+         logger.logInfo('Marked');
+       } catch (e) {
+         if (!context.mounted) return;                   // catch
+         logger.logError('Failed', error: e);
+       }
+     });
+     return null;
+   }, []);
+
+Pick the right gate for the host:
+   - Notifier (`@riverpod class`) → `if (!ref.mounted) return;`
+   - ConsumerWidget / HookConsumerWidget → `if (!context.mounted) return;`
+     (`WidgetRef` has no `mounted` getter — Chronometer Rule 1 forbids
+      adding a `WidgetRef.mounted` extension shim.)
+   - ConsumerStatefulWidget.State → `if (!mounted) return;` (State.mounted)
+
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md
+SSK Async-Surface Taxonomy: .claude/rules/presentation-layer.md
+Sentry Issue: SOCIALSCOREKEEPER-FLUTTER-9CJ""",
+    ),
+    DeferredCallbackSpec(
+        name='scheduleMicrotask',
+        pattern=re.compile(r'scheduleMicrotask\s*\(\s*\(\s*\)\s*(?:async\s+)?\{', re.DOTALL),
+        severity='CRITICAL',
+        # Same detector design as Future.microtask above — only direct
+        # `ref.(read|watch|listen)\(` is flagged. Lazy-getter and
+        # private-method dispatch patterns are correctly safe and would
+        # false-positive if checked here. The class-level lazy-getter
+        # checker catches the real lazy-getter violations at declaration.
+        check_getters=False,
+        check_method_calls=False,
+        mounted_pattern=_MOUNTED_CHECK_BROAD,
+        context_template="CRITICAL: scheduleMicrotask callback without mounted check before ref usage",
+        fix_instructions="""CRITICAL: scheduleMicrotask callbacks MUST check mounted before ref operations
+
+Same shape as Future.microtask — the callback runs on the next event-loop
+turn, the host may be disposed by then, and `ref` operations crash on
+unmounted widgets/notifiers.
+
+✅ FIX: Add a mounted guard at callback entry (and after every await).
+
+BEFORE (CRASHES):
+   scheduleMicrotask(() {
+     final logger = ref.read(unifiedLoggerProvider);   // ❌ may be unmounted
+     ref.read(notifier.notifier).doWork();             // ❌ may be unmounted
+   });
+
+AFTER (SAFE):
+   scheduleMicrotask(() {
+     if (!ref.mounted) return;                         // entry guard
+     final logger = ref.read(unifiedLoggerProvider);
+     ref.read(notifier.notifier).doWork();
+   });
+
+Pick the right gate for the host (see Future.microtask fix instructions
+above for the full surface taxonomy).
+
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md
+SSK Async-Surface Taxonomy: .claude/rules/presentation-layer.md""",
+    ),
 ]
 
 
-def check_deferred_callbacks(ctx: CheckContext) -> List[Violation]:
-    """Check for VIOLATION 10: Timer/Future.delayed/post-frame/.then/.catchError/.whenComplete
-    callbacks without mounted checks.
+_RE_DEFERRED_CALLBACK_REF_USE = re.compile(r'\bref\.(read|watch|listen)\(')
+_RE_DEFERRED_CALLBACK_GETTER_USE = re.compile(
+    r'\b(logger|[a-z][a-zA-Z]*Notifier|[a-z][a-zA-Z]*Service)\s*\.'
+)
+_RE_DEFERRED_CALLBACK_METHOD_USE = re.compile(r'_\w+\s*\(')
 
-    Unified, data-driven approach replacing 6 nearly identical blocks.
+
+# Spec names that are SAFE to run on Riverpod notifier classes
+# (`extends _$Xxx`).
+#
+# The `.then` / `.catchError` / `.whenComplete` / `Future.delayed` / `Timer`
+# specs use `check_getters=True` and `check_method_calls=True`, which match
+# `logger.foo()` / `_helper()` patterns regardless of whether the symbol is
+# a lazy getter or a captured parameter. That ambiguity is acceptable on
+# Consumer*/ConsumerState classes because the lazy-getter false-positive
+# rate is low there. On notifier classes, captured-parameter `logger` and
+# captured-notifier-by-`ref.read(...).notifier`-then-method patterns are
+# the canonical SAFE shape, so those specs would false-positive too often.
+#
+# The two micro-task specs (`Future.microtask` and `scheduleMicrotask`)
+# have `check_getters=False` and `check_method_calls=False`, so they only
+# detect direct `ref.(read|watch|listen)\(` access inside the callback —
+# the exact 9CJ shape — with zero ambiguity. Those are safe to run on
+# notifier classes.
+_NOTIFIER_SAFE_SPEC_NAMES = frozenset({
+    'Future.microtask',
+    'scheduleMicrotask',
+})
+
+
+def check_deferred_callbacks(
+    ctx: CheckContext,
+    *,
+    notifier_scope: bool = False,
+) -> List[Violation]:
+    """Check for VIOLATION 10: Timer/Future.delayed/Future.microtask/scheduleMicrotask/
+    addPostFrameCallback/.then/.catchError/.whenComplete callbacks whose first
+    dangerous usage (ref / lazy-getter / private method) is not preceded by a
+    mounted guard inside the callback body.
+
+    Unified, data-driven approach.
+
+    Detection semantics (1.9.0+): the mounted guard must precede the FIRST
+    dangerous usage in the callback body. A guard inserted AFTER the first
+    `ref.read` does not protect that read; the prior ``has_mounted_check``-
+    anywhere logic under-flagged this case.
+
+    Zero-false-positive design: violation requires BOTH
+      (a) at least one dangerous usage somewhere in the callback body, AND
+      (b) NO mounted guard occurring before the leftmost dangerous usage.
+
+    Comments are stripped before pattern matching so a `ref.read()` mention
+    in a comment does NOT count as a dangerous usage.
+
+    `notifier_scope=True` restricts checking to specs whose detection logic
+    cannot false-positive on captured-parameter / captured-notifier patterns
+    (`Future.microtask` and `scheduleMicrotask`). Set this when running the
+    check on Riverpod notifier classes. Default `False` runs all specs and
+    is the right behaviour for Consumer*/ConsumerState classes.
     """
     violations: List[Violation] = []
 
     for spec in DEFERRED_CALLBACKS:
+        if notifier_scope and spec.name not in _NOTIFIER_SAFE_SPEC_NAMES:
+            continue
+        mounted_pattern = spec.mounted_pattern
+        if mounted_pattern is None:
+            continue
+
         for match in spec.pattern.finditer(ctx.class_content):
             callback_start = match.end()
             callback_end = _find_callback_end(ctx.class_content, callback_start - 1)
-            callback_content = ctx.class_content[callback_start:callback_end]
+            raw_callback_content = ctx.class_content[callback_start:callback_end]
+            # Strip comments so a `ref.read()` mention inside a `// ...` comment
+            # or a `/* ... */` block does NOT count as a dangerous usage, and
+            # equally so a `if (!mounted)` mention inside a comment does NOT
+            # count as a guard. Without this strip, the leftmost-position
+            # comparison gives false positives whenever a comment narrates the
+            # safe pattern that follows it.
+            callback_content = remove_comments(raw_callback_content)
 
-            # Check if callback has mounted check
-            has_mounted_check = spec.mounted_pattern.search(callback_content) if spec.mounted_pattern else False
+            # Find the leftmost position of any "dangerous" usage type the spec
+            # asks us to track. A usage is dangerous because it accesses
+            # `ref` (always), a lazy getter that closes over `ref`
+            # (.then/.catchError/.whenComplete), or a private helper method
+            # that probably accesses `ref` (Future.delayed/Future.microtask/
+            # scheduleMicrotask).
+            first_danger_pos: Optional[int] = None
 
-            # Check if callback uses ref
-            has_ref_usage = bool(re.search(r'\bref\.(read|watch|listen)\(', callback_content))
+            ref_match = _RE_DEFERRED_CALLBACK_REF_USE.search(callback_content)
+            if ref_match is not None:
+                first_danger_pos = ref_match.start()
 
-            # Check if callback uses lazy getters (only for .then/.catchError/.whenComplete)
-            has_getter_usage = False
             if spec.check_getters:
-                has_getter_usage = bool(re.search(
-                    r'\b(logger|[a-z][a-zA-Z]*Notifier|[a-z][a-zA-Z]*Service)\s*\.',
-                    callback_content,
-                ))
+                getter_match = _RE_DEFERRED_CALLBACK_GETTER_USE.search(callback_content)
+                if getter_match is not None and (
+                    first_danger_pos is None or getter_match.start() < first_danger_pos
+                ):
+                    first_danger_pos = getter_match.start()
 
-            # Check if callback calls methods that might use ref (only for Future.delayed)
-            has_method_calls = False
             if spec.check_method_calls:
-                has_method_calls = bool(re.search(r'_\w+\s*\(', callback_content))
+                method_match = _RE_DEFERRED_CALLBACK_METHOD_USE.search(callback_content)
+                if method_match is not None and (
+                    first_danger_pos is None or method_match.start() < first_danger_pos
+                ):
+                    first_danger_pos = method_match.start()
 
-            # Determine if violation should be raised
-            has_dangerous_usage = has_ref_usage or has_getter_usage or has_method_calls
+            if first_danger_pos is None:
+                continue  # nothing to protect — callback is safe
 
-            if has_dangerous_usage and not has_mounted_check:
-                abs_line = ctx.full_content[:ctx.class_start + match.start()].count('\n') + 1
-                snippet_start = max(0, abs_line - 1)
-                snippet_end = min(len(ctx.lines), abs_line + 8)
-                snippet = '\n'.join(f"  {i + 1:4d} | {ctx.lines[i]}" for i in range(snippet_start, snippet_end))
+            # Mounted guard must occur strictly before the first dangerous use.
+            head = callback_content[:first_danger_pos]
+            if mounted_pattern.search(head):
+                continue  # guarded — callback is safe
 
-                violations.append(Violation(
-                    file_path=str(ctx.file_path),
-                    class_name=ctx.class_name,
-                    violation_type=ViolationType.DEFERRED_CALLBACK_UNSAFE_REF,
-                    line_number=abs_line,
-                    context=spec.context_template,
-                    code_snippet=snippet,
-                    fix_instructions=spec.fix_instructions,
-                ))
+            abs_line = ctx.full_content[:ctx.class_start + match.start()].count('\n') + 1
+            snippet_start = max(0, abs_line - 1)
+            snippet_end = min(len(ctx.lines), abs_line + 8)
+            snippet = '\n'.join(
+                f"  {i + 1:4d} | {ctx.lines[i]}"
+                for i in range(snippet_start, snippet_end)
+            )
+
+            violations.append(Violation(
+                file_path=str(ctx.file_path),
+                class_name=ctx.class_name,
+                violation_type=ViolationType.DEFERRED_CALLBACK_UNSAFE_REF,
+                line_number=abs_line,
+                context=spec.context_template,
+                code_snippet=snippet,
+                fix_instructions=spec.fix_instructions,
+            ))
 
     return violations
 

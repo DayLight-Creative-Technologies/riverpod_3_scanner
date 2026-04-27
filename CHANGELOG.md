@@ -5,6 +5,35 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-04-27
+
+### Added
+
+- **Off-frame async coverage extension (`DEFERRED_CALLBACK_UNSAFE_REF`)**: The `check_deferred_callbacks` checker now flags `Future.microtask` and `scheduleMicrotask` callback bodies whose first `ref.read`/`ref.watch`/`ref.listen` is not preceded by a mounted guard. These two surfaces were the only common Dart off-frame primitives not previously covered, and `Future.microtask` was the exact trigger for Sentry SOCIALSCOREKEEPER-FLUTTER-9CJ — `ref.read` after widget unmount inside a `useEffect` microtask callback.
+- Both new specs are CRITICAL severity, flag both `() {}` and `() async {}` callback shapes, and emit fix instructions documenting the SSK async-surface taxonomy (Notifier → `ref.mounted`; ConsumerWidget/HookConsumerWidget → `context.mounted`; ConsumerStatefulWidget.State → `State.mounted`).
+
+### Fixed
+
+- **`_MOUNTED_CHECK_BROAD` regex now recognizes `context.mounted` as a valid guard**: The previous regex `if\s*\(\s*!?\s*(ref\.)?\s*mounted\s*\)` matched only `ref.mounted` and bare `mounted` — it false-flagged any callback whose guard was `if (!context.mounted)`, which is the canonical widget-side gate per `presentation-layer.md` (since `WidgetRef` has no `mounted` getter in Riverpod 3.x). The new regex matches any-prefix `.mounted` form (`ref.mounted`, `context.mounted`, `myCtx.mounted`) and also accepts compound guards (`if (!context.mounted || flag)`, `if (mounted && cond)`).
+- **All deferred-callback patterns now match `() async {}` callback shapes**: Previous patterns matched only `() {}` form, missing every async-bodied callback (a common Riverpod 3.x shape).
+- **`.then()` / `.catchError()` / `.whenComplete()` specs upgraded from `_MOUNTED_CHECK_WIDGET` to `_MOUNTED_CHECK_BROAD`**: Eliminates false-positive flagging of correct widget code that uses `if (!context.mounted)` instead of `if (!mounted)` inside these continuation callbacks.
+
+### Authoritative reference
+
+- SSK Async-Surface Taxonomy: `.claude/rules/presentation-layer.md` (canonical home for the per-surface mounted-gate prescription).
+- The Bridge Code Pattern Violation Table: `.claude/docs/standards/the_bridge.md` (added sibling rows per surface).
+- async_patterns.md: `.claude/docs/guides/async_patterns.md` (Golden Pattern + anti-pattern examples per surface, including the OFF-FRAME ASYNC trap section that supersedes the prior — incorrect — `keepAlive` deferred-execution advice).
+
+### Test Fixtures
+
+- Added `tests/fixtures/offframe_async_passing.dart` — 6 passing patterns (Notifier `ref.mounted`, ConsumerStatefulWidget.State `mounted`, ConsumerWidget `context.mounted`, pre-capture-then-microtask, comment-with-`ref.read()`-text, compound mounted guards). Must produce 0 violations.
+- Added `tests/fixtures/offframe_async_violations.dart` — 4 violation patterns covering `Future.microtask` no-guard, mounted-after-ref, `scheduleMicrotask` no-guard in a notifier class, and `addPostFrameCallback` with `() async {}` body. Must produce 4 violations.
+
+### Validation
+
+- Tested against SocialScoreKeeper production codebase: detected **13 confirmed off-frame async + ref violations** across 9 distinct files (`app.dart`; auth flow `forgot_view.dart` + `password_reset_otp_view.dart`; three subscription tier modals × 2 callbacks each; scoreboard / nav-item / tournaments / schedule-import surfaces). **Zero false positives**: every flagged violation manually verified, every previously-passing-but-now-flaggable file (4 false-positive candidates: `vip_code_qr_scanner.dart` × 2 with `if (!mounted)` AFTER comment containing `ref.read`; `context_resolver.dart`, `password_recovery_listener.dart`, `shootout_attempt_row.dart` with pre-capture-then-microtask) verified safe and unflagged. All 5 pre-existing `tests/fixtures/*_passing.dart` corpora continue to produce 0 violations (no regressions).
+- Notifier-scope restriction: `check_deferred_callbacks` now also runs on Riverpod notifier classes (`extends _$Xxx`), but restricted to the two micro-task specs (`Future.microtask`, `scheduleMicrotask`) whose detection logic — direct `ref.(read|watch|listen)\(` only, no lazy-getter or private-method dispatch — cannot false-positive on captured-parameter patterns common in service-class notifiers. The other 6 specs (`.then` / `.catchError` / `.whenComplete` / `Future.delayed` / `Timer` / `addPostFrameCallback`) continue to run only on Consumer*/State classes where their broader detection is safe.
+
 ## [1.8.0] - 2026-04-12
 
 ### Added
