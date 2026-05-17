@@ -105,9 +105,11 @@ RE_WIDGET_HELPER = re.compile(
     r'Widget\s+(_\w+)\s*\([^)]*\)\s*\{', re.DOTALL
 )
 
-# Ref stored as field in plain class (not Riverpod notifier)
+# Ref / WidgetRef stored as field in plain class (not Riverpod notifier).
+# Group 1 = the ref type token, group 2 = the field name. Optional generic
+# (`Ref<X>`) is tolerated so a generically-typed field is not missed.
 RE_REF_FIELD_STORAGE = re.compile(
-    r'(?:@override\s+)?(?:late\s+)?final\s+Ref\b\s+(\w+)\s*;',
+    r'(?:@override\s+)?(?:late\s+)?final\s+(Ref|WidgetRef)\b(?:<[^>]*>)?\s+(\w+)\s*;',
 )
 RE_ANY_CLASS_DECL = re.compile(
     r'(?:(?:abstract|sealed|final|base|interface|mixin)\s+)*'
@@ -206,24 +208,28 @@ class FileCache:
 # 4. String-aware Dart parsing
 # =============================================================================
 
-def find_matching_brace(content: str, start: int) -> int:
-    """Find the matching closing brace from position right after opening '{'.
+def _find_matching_delimiter(
+    content: str,
+    start: int,
+    open_ch: str,
+    close_ch: str,
+) -> int:
+    """Find the matching closing delimiter from just after an opening one.
 
     Correctly skips string literals (single-quoted, double-quoted, triple-quoted,
-    raw strings), single-line comments (//), and multi-line comments (/* */).
-
-    This is a critical improvement over the old _find_class_end / _find_method_end /
-    _find_block_end / _find_callback_end functions which did not handle strings or
-    comments, leading to incorrect brace matching when code contained braces inside
-    strings (e.g., interpolation, JSON templates, regex patterns).
+    raw strings), single-line comments (//), and multi-line comments (/* */) — so
+    a delimiter inside a string or comment never miscounts depth.
 
     Args:
         content: The full source content.
-        start: Position immediately after the opening '{' (i.e., the first character
-               inside the block). The opening '{' at content[start-1] is already counted.
+        start: Position immediately after the opening delimiter (the first
+               character inside the block). The opening delimiter at
+               content[start-1] is already counted.
+        open_ch: The opening delimiter character (e.g. '{' or '(').
+        close_ch: The matching closing delimiter character (e.g. '}' or ')').
 
     Returns:
-        Position of the matching '}', or len(content) if not found.
+        Position of the matching closing delimiter, or len(content) if not found.
     """
     depth = 1
     length = len(content)
@@ -263,10 +269,10 @@ def find_matching_brace(content: str, start: int) -> int:
             i = _skip_simple_string(content, i, length, ch)
             continue
 
-        # --- Brace counting ---
-        if ch == '{':
+        # --- Delimiter counting ---
+        if ch == open_ch:
             depth += 1
-        elif ch == '}':
+        elif ch == close_ch:
             depth -= 1
             if depth == 0:
                 return i
@@ -274,6 +280,42 @@ def find_matching_brace(content: str, start: int) -> int:
         i += 1
 
     return length
+
+
+def find_matching_brace(content: str, start: int) -> int:
+    """Find the matching closing brace from position right after opening '{'.
+
+    Skips string literals (single/double/triple-quoted, raw) and comments so a
+    brace inside a string (interpolation, JSON template, regex) never miscounts.
+
+    Args:
+        content: The full source content.
+        start: Position immediately after the opening '{' (the first character
+               inside the block). The opening '{' at content[start-1] is counted.
+
+    Returns:
+        Position of the matching '}', or len(content) if not found.
+    """
+    return _find_matching_delimiter(content, start, '{', '}')
+
+
+def find_matching_paren(content: str, start: int) -> int:
+    """Find the matching ')' from the position right after an opening '('.
+
+    Same string- and comment-aware scanning as `find_matching_brace`. Used to
+    delimit a constructor / function parameter list precisely — the initializer
+    list of a constructor (`: _x = compute(a)`) contains its own parentheses, so
+    "first ')' wins" is incorrect; only the depth-0 match ends the param list.
+
+    Args:
+        content: The full source content.
+        start: Position immediately after the opening '(' (the first character
+               inside the list). The opening '(' at content[start-1] is counted.
+
+    Returns:
+        Position of the matching ')', or len(content) if not found.
+    """
+    return _find_matching_delimiter(content, start, '(', ')')
 
 
 def _skip_raw_string(content: str, quote_pos: int, length: int) -> int:

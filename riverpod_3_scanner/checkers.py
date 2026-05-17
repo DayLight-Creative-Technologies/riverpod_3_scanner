@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 from .models import Violation, ViolationType, MethodKey
 from .utils import (
     find_matching_brace,
+    find_matching_paren,
     find_statement_end,
     strip_comments,
     remove_comments,
@@ -2533,31 +2534,144 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
 
 
 # ===========================================================================
-# CHECKER 13: check_ref_stored_as_field
+# CHECKER 13: check_ref_into_plain_class
 # ===========================================================================
 
-def check_ref_stored_as_field(
+# Type token of a single constructor parameter whose declared type is exactly
+# `Ref` or `WidgetRef`. Applied per-parameter AFTER the parameter list is split
+# on top-level commas and any leading `required` / `covariant` is stripped — so
+# a `void Function(Ref ref)` callback parameter (type token `void`) and a
+# `this._ref` field-initializing parameter (no type token) never match.
+_RE_REF_PARAM_TYPE = re.compile(r'^(Ref|WidgetRef)\b(?:<[^>]*>)?\??\s+\w+')
+
+
+def _split_top_level_params(param_text: str) -> List[str]:
+    """Split a parameter list's inner text into its top-level parameters.
+
+    Only ``(`` / ``)`` nesting is tracked for depth — a function-typed
+    parameter (``void Function(A a, B b) cb``) or a call in a default value
+    (``= compute(x, y)``) keeps its inner commas. The optional-parameter group
+    delimiters ``{`` ``}`` ``[`` ``]`` are deliberately NOT tracked: commas
+    inside a ``{named}`` / ``[positional]`` group DO separate parameters. A
+    collection-literal default (``= [1, 2]``) may over-split, but that only
+    yields inert fragments — a ``Ref`` / ``WidgetRef`` parameter never carries
+    an internal comma (it has no default value), so it can be neither merged
+    away nor fabricated. Group delimiters and modifiers are stripped per
+    fragment so the caller can test the bare ``Type name`` form.
+    """
+    params: List[str] = []
+    depth = 0
+    current: List[str] = []
+    for ch in param_text:
+        if ch == '(':
+            depth += 1
+            current.append(ch)
+        elif ch == ')':
+            depth = max(0, depth - 1)
+            current.append(ch)
+        elif ch == ',' and depth == 0:
+            params.append(''.join(current))
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        params.append(''.join(current))
+
+    cleaned: List[str] = []
+    for raw in params:
+        p = raw.strip().lstrip('{[').rstrip('}]').strip()
+        p = re.sub(r'^(?:required\s+|covariant\s+)+', '', p)
+        if p:
+            cleaned.append(p)
+    return cleaned
+
+
+def _ref_in_plain_class_fix(
+    class_name: str,
+    ref_type: str,
+    field_name: Optional[str],
+) -> str:
+    """Shared fix text for the field-storage and constructor-parameter cases."""
+    held = field_name if field_name else 'ref'
+    provider_fn = class_name[0].lower() + class_name[1:]
+    return f"""CRITICAL: A plain Dart class must never take or store {ref_type}.
+
+A plain class is not owned by the Riverpod framework. When the provider or
+widget that created it disposes, the {ref_type} it holds becomes invalid — the
+next ref.read()/ref.watch() crashes with UnmountedRefException.
+
+PRODUCTION CRASH: Sentry UnmountedRefException on {class_name}
+
+FORBIDDEN:
+  class {class_name} {{
+    final {ref_type} {held};            // dead once the owner disposes
+
+    Future<void> doWork() async {{
+      await operation();
+      {held}.read(provider);            // CRASH: UnmountedRefException
+    }}
+  }}
+
+FIX: Inject the specific dependencies the class needs — never the ref itself.
+Resolve them from ref at the provider boundary and pass the resolved values:
+
+  class {class_name} {{
+    final MyService _service;           // what you actually need
+    final UnifiedLogger _logger;        // not the ref
+
+    {class_name}({{
+      required MyService service,
+      required UnifiedLogger logger,
+    }}) : _service = service, _logger = logger;
+  }}
+
+  @riverpod
+  {class_name} {provider_fn}(Ref ref) => {class_name}(
+        service: ref.watch(myServiceProvider),
+        logger: ref.read(unifiedLoggerProvider),
+      );
+
+Reference: Riverpod async safety — never pass or store ref in plain classes.
+https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md"""
+
+
+def check_ref_into_plain_class(
     file_path: Path,
     content: str,
     lines: List[str],
 ) -> List[Violation]:
-    """Check for Ref stored as a field in non-Riverpod plain classes.
+    """Check for Ref / WidgetRef entering a non-Riverpod plain class.
 
     Riverpod notifier classes (extends _$X), ConsumerState, and ConsumerWidget
-    legitimately receive ``ref`` from the framework. Plain Dart classes that
-    store ``Ref`` as a field are forbidden because:
+    legitimately receive ``ref`` from the framework. A plain Dart class that
+    takes or stores ``Ref`` / ``WidgetRef`` is forbidden because:
 
-    1. The creating provider may auto-dispose, invalidating the stored Ref.
-    2. Any subsequent ``ref.read()`` / ``ref.watch()`` call on the disposed Ref
+    1. The creating provider / widget may dispose, invalidating the held ref.
+    2. Any subsequent ``ref.read()`` / ``ref.watch()`` call on the disposed ref
        throws ``UnmountedRefException`` (production crash).
-    3. It violates the architectural rule: "Never pass or store Ref in plain classes."
+    3. It violates the architectural rule: "Never pass or store ref in plain classes."
 
-    Detection:
+    Two patterns are detected:
+
+    - **Stored as a field** (``REF_STORED_AS_FIELD``): ``final Ref <name>;`` /
+      ``final WidgetRef <name>;`` field declarations (optional ``@override`` /
+      ``late``). The ref outlives its owner and is read after disposal.
+    - **Passed to a constructor** (``REF_PASSED_TO_PLAIN_CLASS``): a constructor
+      parameter declared with type ``Ref`` or ``WidgetRef``. This is the
+      *entry point* — caught one step before storage, and it catches shapes the
+      field regex cannot (e.g. ``Ref<X>`` fields, ref used only transiently).
+
+    Both run on a comment-stripped copy of the class body, so example code
+    inside a doc comment cannot produce a false positive.
+
+    Detection scope:
     - Finds ALL ``class`` declarations in the file.
     - Skips classes that extend ``_$*`` (Riverpod notifiers), ``ConsumerState``,
-      or ``ConsumerWidget`` — these get ``ref`` from the framework.
-    - Checks the class body for ``final Ref <name>;`` field declarations
-      (with optional ``@override`` and ``late`` modifiers).
+      or ``ConsumerWidget`` — these get ``ref`` from the framework. (A
+      ``ConsumerWidget`` ``build(BuildContext, WidgetRef)`` is a method, never a
+      constructor, so it is never matched by the constructor scan regardless.)
+    - ``@riverpod`` provider *functions* (``T foo(Ref ref)``) are top-level
+      functions, not in-class constructors — never matched.
 
     This check runs at file scope (not per-CheckContext) because it must scan
     classes that are NOT Riverpod notifiers — the main scanner loop only visits
@@ -2618,11 +2732,20 @@ def check_ref_stored_as_field(
         class_body = content[orig_pos:class_end + 1]
         class_start_offset = orig_pos
 
-        # Check for Ref field in this class body
-        for ref_match in RE_REF_FIELD_STORAGE.finditer(class_body):
-            field_name = ref_match.group(1)
-            abs_line = content[:class_start_offset + ref_match.start()].count('\n') + 1
+        # Both scans run on a comment-stripped copy of the class body so
+        # example code inside a doc comment cannot false-positive. body_map
+        # maps a stripped-body index back to the original class_body index.
+        stripped_body, body_map = strip_comments(class_body)
 
+        def _abs_line(stripped_idx: int) -> int:
+            orig_idx = body_map.get(stripped_idx, stripped_idx)
+            return content[:class_start_offset + orig_idx].count('\n') + 1
+
+        # --- Pattern 1: Ref / WidgetRef stored as a field ---
+        for ref_match in RE_REF_FIELD_STORAGE.finditer(stripped_body):
+            ref_type = ref_match.group(1)
+            field_name = ref_match.group(2)
+            abs_line = _abs_line(ref_match.start())
             snippet = extract_snippet(lines, abs_line, before=2, after=3)
 
             violations.append(Violation(
@@ -2631,61 +2754,60 @@ def check_ref_stored_as_field(
                 violation_type=ViolationType.REF_STORED_AS_FIELD,
                 line_number=abs_line,
                 context=(
-                    f"Ref stored as field '{field_name}' in plain class "
-                    f"{class_name} — crashes when provider disposes during "
+                    f"{ref_type} stored as field '{field_name}' in plain class "
+                    f"{class_name} — crashes when the owner disposes during "
                     f"async operations (UnmountedRefException)"
                 ),
                 code_snippet=snippet,
-                fix_instructions=f"""CRITICAL: Storing Ref as a field in a plain Dart class is forbidden.
-
-When the creating provider disposes (auto-dispose, user navigates away),
-the stored Ref becomes invalid. Any subsequent ref.read()/ref.watch() call
-crashes with UnmountedRefException.
-
-PRODUCTION CRASH: Sentry UnmountedRefException on {class_name}
-
-WHY THIS HAPPENS:
-  @riverpod  // auto-dispose
-  {class_name} create{class_name}(Ref ref) {{
-    return {class_name}(ref: ref);  // Ref stored in plain class
-  }}
-
-  // Later, provider disposes, but class still holds dead Ref:
-  class {class_name} {{
-    final Ref {field_name};  // <-- DEAD after provider disposal
-
-    Future<void> doWork() async {{
-      await operation();
-      {field_name}.read(provider);  // CRASH: UnmountedRefException
-    }}
-  }}
-
-FIX: Inject specific dependencies, not Ref:
-
-  class {class_name} {{
-    final MyService _service;      // Inject what you need
-    final UnifiedLogger _logger;   // Not Ref itself
-
-    {class_name}({{
-      required MyService service,
-      required UnifiedLogger logger,
-    }}) : _service = service, _logger = logger;
-  }}
-
-  @riverpod
-  {class_name} create{class_name}(Ref ref) {{
-    return {class_name}(
-      service: ref.watch(myServiceProvider),
-      logger: ref.read(unifiedLoggerProvider),
-    );
-  }}
-
-Reference: Riverpod async safety — never pass or store Ref in plain classes.
-https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+                fix_instructions=_ref_in_plain_class_fix(
+                    class_name, ref_type, field_name,
+                ),
             ))
-
-            # One violation per class is sufficient — break after first Ref field
+            # One field violation per class is sufficient.
             break
+
+        # --- Pattern 2: Ref / WidgetRef passed to a constructor ---
+        # A constructor declaration is `ClassName(...)` / `ClassName.named(...)`
+        # whose parameter list is followed by `{` (body), `;` (bodyless),
+        # `:` (initializer list) or `=` (redirecting factory). That trailing
+        # char rejects constructor *invocations* and any `ClassName(` that
+        # appears inside a string literal — only a real declaration qualifies.
+        ctor_re = re.compile(
+            r'\b' + re.escape(class_name) + r'(?:\.\w+)?\s*\(',
+        )
+        for ctor_match in ctor_re.finditer(stripped_body):
+            paren_open = ctor_match.end()  # index just past the '('
+            paren_close = find_matching_paren(stripped_body, paren_open)
+            after = stripped_body[paren_close + 1:].lstrip()
+            if not after or after[0] not in '{;:=':
+                continue  # not a constructor declaration
+            param_text = stripped_body[paren_open:paren_close]
+            for param in _split_top_level_params(param_text):
+                type_match = _RE_REF_PARAM_TYPE.match(param)
+                if not type_match:
+                    continue
+                ref_type = type_match.group(1)
+                abs_line = _abs_line(ctor_match.start())
+                snippet = extract_snippet(lines, abs_line, before=2, after=3)
+                violations.append(Violation(
+                    file_path=str(file_path),
+                    class_name=class_name,
+                    violation_type=ViolationType.REF_PASSED_TO_PLAIN_CLASS,
+                    line_number=abs_line,
+                    context=(
+                        f"{ref_type} passed to a constructor of plain class "
+                        f"{class_name} (parameter '{param.strip()}') — a plain "
+                        f"class must inject specific dependencies, never the "
+                        f"ref; storing or using it post-disposal throws "
+                        f"UnmountedRefException"
+                    ),
+                    code_snippet=snippet,
+                    fix_instructions=_ref_in_plain_class_fix(
+                        class_name, ref_type, None,
+                    ),
+                ))
+                # One violation per constructor is sufficient.
+                break
 
     return violations
 

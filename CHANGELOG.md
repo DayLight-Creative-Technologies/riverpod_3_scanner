@@ -5,6 +5,35 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-05-17
+
+### Added
+
+- **`REF_PASSED_TO_PLAIN_CLASS` — `Ref` / `WidgetRef` passed to a plain-class constructor**: A constructor of a non-Riverpod plain class whose parameter is typed `Ref` or `WidgetRef` is now flagged (CRITICAL). This is the *entry point* to the existing `REF_STORED_AS_FIELD` violation — caught one step before storage, and it catches shapes the field regex cannot (e.g. `Ref<X>` fields, a ref used only transiently). A plain class is not owned by the framework; when its creating provider/widget disposes, the held ref becomes invalid and the next `ref.read()` throws `UnmountedRefException`.
+
+### Changed
+
+- **`check_ref_stored_as_field` → `check_ref_into_plain_class`**: The checker (CHECKER 13) was renamed and now reports both the field-storage pattern (`REF_STORED_AS_FIELD`) and the new constructor-parameter pattern (`REF_PASSED_TO_PLAIN_CLASS`). Both run on a comment-stripped copy of the class body, so example code in a doc comment cannot false-positive.
+- **`REF_STORED_AS_FIELD` now also detects `WidgetRef` fields**: `RE_REF_FIELD_STORAGE` previously matched only `final Ref <name>;`. It now matches `final (Ref|WidgetRef)<...>? <name>;` — a plain class storing a `WidgetRef` is the identical hazard (the widget unmounts, the stored ref dies) and was previously invisible. An optional generic (`Ref<X>`) is now tolerated so a generically-typed field is not missed.
+
+### Why this is a true 0%-false-positive check
+
+The detection is precise *because it is scoped to plain-class constructors and fields* — surfaces with no legitimate `ref` form — not to function parameters generally. A blanket "ref passed as a parameter" check is mathematically incapable of 0% false positives: `(Ref ref)` is the mandatory signature of every `@riverpod` provider function, and a `ConsumerWidget` cannot decompose `build` into helpers without passing its `WidgetRef` (it has no instance ref). Those ~500 idiomatic, framework-required uses are *correct code*. This checker flags only the narrow surface — a plain class taking or holding a ref — where there is no legitimate form, which is exactly why `@riverpod` provider functions, `build()` methods, and `Consumer` builder closures are never matched (none is a plain-class constructor or field).
+
+### Internal
+
+- `find_matching_brace` was refactored onto a shared `_find_matching_delimiter(content, start, open, close)` core (behavior-preserving for braces — identical depth/string/comment logic), and a parallel `find_matching_paren` was added to delimit a constructor parameter list precisely. "First `)` wins" is incorrect for a constructor — its initializer list (`: _x = compute(a)`) contains its own parentheses; only the depth-0 match ends the parameter list.
+- Constructor-vs-invocation disambiguation: a matched `ClassName(...)` qualifies as a declaration only when its parameter list is followed by `{` (body), `;` (bodyless), `:` (initializer list), or `=` (redirecting factory). This trailing-char gate rejects constructor invocations and any `ClassName(` that appears inside a string literal.
+
+### Test Fixtures
+
+- Added `tests/fixtures/ref_into_plain_class_passing.dart` — 6 passing patterns (`@riverpod` provider function, `ConsumerWidget` with a `WidgetRef`-taking build helper, Riverpod notifier, plain class with a `void Function(Ref ref)` callback parameter, plain class with a clean constructor, doc comment containing the forbidden shape as a counter-example). Must produce 0 violations.
+- Added `tests/fixtures/ref_into_plain_class_violations.dart` — 5 violation patterns (`final Ref` field, `final WidgetRef` field, constructor taking `Ref`, named constructor taking `Ref`, constructor taking `WidgetRef` as a named parameter). Must produce 5 violations.
+
+### Validation
+
+- Tested against the SocialScoreKeeper production codebase (`lib/`): **0 violations, 0 false positives**. An independent `grep` for `final (Ref|WidgetRef)` fields and plain-class ref constructors confirmed the codebase genuinely has no instances — the checker's clean result is truthful, not a missed detection. All 5 pre-existing fixture corpora (`field_caching_bang`, `catch_block`, `offframe_async`, `state_access`, `state_assign_await`) continue to produce their expected counts — the `find_matching_brace` refactor introduced no regression.
+
 ## [1.9.0] - 2026-04-27
 
 ### Added
