@@ -5,6 +5,34 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-05-22
+
+### Added
+
+- **`ASYNC_STAR_REF_BEFORE_MOUNTED` — unguarded `ref` in an `async*` function provider**: A top-level `@riverpod` / `@Riverpod(...)` *function* provider declared `async*` (a `Stream` generator) whose first `ref.read` / `ref.watch` / `ref.listen` is not preceded by an `if (!ref.mounted)` guard is now flagged (CRITICAL). An `async*` body does not execute synchronously with the provider's `build()` — the generator runs lazily, after the provider element is created. If the element is disposed (invalidated, or its last listener removed) before the body's first line runs, that first `ref` operation touches a dead `Ref` and throws `UnmountedRefException` (production crash).
+
+### Why this gap existed
+
+The scanner's per-class scan loop visits notifier classes (`extends _$X`), `ConsumerState`, and `ConsumerWidget`. A class notifier's `Stream<T> build() async*` was already covered by `check_async_method_safety`. But **top-level `@riverpod` function providers are not classes** — they were never scanned at all. `CHECKER 14` (`check_async_star_function_providers`) runs at file scope to close this gap, mirroring how `check_ref_into_plain_class` reaches non-notifier classes.
+
+### Why this is a true 0%-false-positive check
+
+The check fires **only** on `async*` providers. A plain `async` function provider runs its body synchronously up to the first `await`, so its first `ref.read` executes while the `Ref` is guaranteed live — flagging it would be a false positive, so the trailing `async*` marker is verified explicitly (a synchronous `{...}` body and an `=>` body are likewise skipped). Triggers are `ref.read` / `ref.watch` / `ref.listen` only — `ref.onDispose` / `ref.keepAlive` are lifecycle registrations, not disposed-`Ref` reads, so a provider that registers `onDispose` first and then guards before its first real read is correctly considered safe. Class notifier `build` methods are excluded by construction (they carry `@override`, not `@riverpod`, and take no `Ref` parameter), so the new checker cannot double-count what `check_async_method_safety` already reports.
+
+### Internal
+
+- New `RE_STREAM_FN_PROVIDER_HEAD` (utils) matches the annotation + `Stream<...> name(` head; the parameter-list end is resolved with `find_matching_paren` and the `async*` body marker is verified in code, so a function-typed parameter (`void Function() cb`) cannot truncate the match.
+- New checker `check_async_star_function_providers(file_path, content, lines)` runs on a comment-stripped copy of the file (a commented-out `ref.read`, a commented guard, or an annotation inside a doc comment cannot affect the result), with `strip_comments` position mapping for accurate line numbers.
+
+### Test Fixtures
+
+- Added `tests/fixtures/async_star_provider_violations.dart` — 5 violation patterns (`ref.read` first, `ref.watch` first, `ref.listen` first, the `@Riverpod(keepAlive: true)` annotation form, and a guard placed *after* the first read). Must produce 5 violations.
+- Added `tests/fixtures/async_star_provider_passing.dart` — 6 passing patterns (mounted gate first, `@Riverpod(keepAlive: true)` guarded, an `async*` that only passes `ref` through to another function, a plain `async` Future provider with an unguarded read, a synchronous `Stream` provider, and `ref.onDispose` followed by a guard). Must produce 0 violations.
+
+### Validation
+
+- Tested against the SocialScoreKeeper production codebase (`lib/`): the checker flagged exactly 7 top-level `@riverpod async*` function providers with an unguarded first `ref` operation — every one independently audited and confirmed a real `UnmountedRefException` hazard — and correctly stayed silent on the guarded providers and on an `async*` provider that performs no `ref.read/watch/listen`. **0 false positives, 0 false negatives.** After the 7 were fixed, a re-scan reported 0. All 6 pre-existing fixture corpora (`field_caching_bang`, `catch_block`, `offframe_async`, `ref_into_plain_class`, `state_access`, `state_assign_await`) continue to produce their expected counts — no regression.
+
 ## [1.10.0] - 2026-05-17
 
 ### Added

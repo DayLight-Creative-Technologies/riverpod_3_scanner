@@ -32,8 +32,10 @@ from .utils import (
     RE_REF_ALL_OPERATIONS,
     RE_MOUNTED_CHECK_BROAD,
     RE_MOUNTED_CHECK_WIDGET,
+    RE_MOUNTED_CHECK_PROVIDER,
     RE_REF_FIELD_STORAGE,
     RE_ANY_CLASS_DECL,
+    RE_STREAM_FN_PROVIDER_HEAD,
     RE_PROVIDER_CLASS,
     RE_CONSUMER_STATE_CLASS,
     RE_CONSUMER_WIDGET_CLASS,
@@ -2808,6 +2810,137 @@ def check_ref_into_plain_class(
                 ))
                 # One violation per constructor is sufficient.
                 break
+
+    return violations
+
+
+# ===========================================================================
+# CHECKER 14: check_async_star_function_providers
+# ===========================================================================
+
+def _get_async_star_ref_fix() -> str:
+    """Fix instructions for an unguarded async* function provider."""
+    return """An async* (Stream generator) provider body does NOT run
+synchronously with build() — execution begins after the provider element is
+created. The element can be disposed (invalidated, or its last listener
+removed) before the body's first line runs, leaving the Ref dead.
+
+Add a mounted gate as the FIRST statement, before any ref.read/watch/listen:
+
+   @riverpod
+   Stream<T> myProvider(Ref ref) async* {
+     if (!ref.mounted) return;            // <- first statement
+     final dep = ref.read(someProvider);
+     yield* dep.stream();
+   }
+
+ref.read / ref.watch / ref.listen on a disposed Ref throw UnmountedRefException.
+This applies only to async* providers — a plain `async` provider's first line
+DOES run synchronously with build() and needs no entry guard."""
+
+
+def check_async_star_function_providers(
+    file_path: Path,
+    content: str,
+    lines: List[str],
+) -> List[Violation]:
+    """CHECKER 14: top-level @riverpod async* function providers whose first
+    ref.read / ref.watch / ref.listen is not preceded by an `if (!ref.mounted)`
+    guard.
+
+    An ``async*`` (Stream generator) function body runs lazily — it does not
+    execute synchronously with the provider's build(). Between the provider
+    element being created and the generator body's first line running, the
+    element can be disposed. The first ``ref.read`` then throws
+    ``UnmountedRefException`` (production crash).
+
+    A plain ``async`` function provider is NOT affected: its body runs
+    synchronously up to the first ``await``, so the first ``ref.read`` executes
+    while the Ref is guaranteed live. This checker therefore fires ONLY on
+    ``async*`` providers — the trailing ``async*`` marker is verified
+    explicitly, and a sync / ``=>`` stream provider is likewise skipped.
+
+    Class notifier ``build()`` methods (``Stream<T> build() async*``) are
+    already covered by ``check_async_method_safety``; they are excluded here by
+    construction — no ``Ref`` parameter, annotated ``@override`` not
+    ``@riverpod``.
+
+    Trigger operations are ``ref.read`` / ``ref.watch`` / ``ref.listen`` only.
+    ``ref.onDispose`` / ``ref.keepAlive`` are lifecycle registrations, not
+    disposed-Ref triggers, and are intentionally NOT treated as the first
+    operation — so a provider that registers ``onDispose`` first and then
+    guards before its first real read is correctly considered safe.
+
+    Runs at file scope: top-level function providers are not classes, so the
+    main per-class scan loop never visits them.
+    """
+    violations: List[Violation] = []
+
+    # Strip comments so a commented-out ref.read, a commented guard, or an
+    # annotation inside a doc comment cannot affect the result. pos_map maps a
+    # stripped-content index back to the original index for line reporting.
+    stripped, pos_map = strip_comments(content)
+
+    for head in RE_STREAM_FN_PROVIDER_HEAD.finditer(stripped):
+        func_name = head.group(1)
+        paren_open = head.end()  # index just past the '('
+
+        # A top-level function provider's first parameter is the framework
+        # `Ref`. Anything else is not a function provider (a notifier build
+        # takes no parameters) — skip.
+        after_paren = stripped[paren_open:paren_open + 64].lstrip()
+        if not re.match(r'Ref\s+\w', after_paren):
+            continue
+
+        paren_close = find_matching_paren(stripped, paren_open)
+        if paren_close >= len(stripped):
+            continue
+
+        # Only `async*` bodies have the deferred-first-line hazard. A plain
+        # `async` is impossible for a Stream return; a sync `{...}` body or an
+        # `=>` body runs its first statement synchronously with build() and is
+        # safe — both are skipped here.
+        tail_match = re.match(r'\s*async\*\s*\{', stripped[paren_close + 1:])
+        if not tail_match:
+            continue
+
+        body_open = paren_close + 1 + tail_match.end()  # just past body '{'
+        body_close = find_matching_brace(stripped, body_open)
+        if body_close >= len(stripped):
+            continue
+        body = stripped[body_open:body_close]
+
+        # First dangerous ref operation (read/watch/listen only).
+        op_match = RE_REF_OPERATION.search(body)
+        if not op_match:
+            continue  # provider never reads/watches/listens — safe
+
+        # An `if (!ref.mounted)` guard occurring before that operation makes
+        # it safe (same guard-before-operation logic as check_async_method_safety).
+        guard_match = RE_MOUNTED_CHECK_PROVIDER.search(body)
+        if guard_match and guard_match.start() < op_match.start():
+            continue
+
+        # Violation — reported at the unguarded ref operation.
+        op_stripped_idx = body_open + op_match.start()
+        orig_idx = pos_map.get(op_stripped_idx, op_stripped_idx)
+        abs_line = content[:orig_idx].count('\n') + 1
+        op_name = f"ref.{op_match.group(1)}()"
+
+        violations.append(Violation(
+            file_path=str(file_path),
+            class_name=func_name,
+            violation_type=ViolationType.ASYNC_STAR_REF_BEFORE_MOUNTED,
+            line_number=abs_line,
+            context=(
+                f"async* provider '{func_name}': {op_name} runs before any "
+                f"ref.mounted guard — the generator body executes after the "
+                f"provider element is created, so the Ref may already be "
+                f"disposed (UnmountedRefException)"
+            ),
+            code_snippet=extract_snippet(lines, abs_line, before=2, after=3),
+            fix_instructions=_get_async_star_ref_fix(),
+        ))
 
     return violations
 

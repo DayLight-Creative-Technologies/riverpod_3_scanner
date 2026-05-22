@@ -37,6 +37,7 @@ class ViolationType(Enum):
     REF_STORED_AS_FIELD = "ref_stored_as_field"
     REF_PASSED_TO_PLAIN_CLASS = "ref_passed_to_plain_class"
     STATE_ASSIGN_AWAIT = "state_assign_await"
+    ASYNC_STAR_REF_BEFORE_MOUNTED = "async_star_ref_before_mounted"
 
 
 VIOLATION_SEVERITY = {
@@ -59,6 +60,7 @@ VIOLATION_SEVERITY = {
     ViolationType.REF_STORED_AS_FIELD: Severity.CRITICAL,
     ViolationType.REF_PASSED_TO_PLAIN_CLASS: Severity.CRITICAL,
     ViolationType.STATE_ASSIGN_AWAIT: Severity.CRITICAL,
+    ViolationType.ASYNC_STAR_REF_BEFORE_MOUNTED: Severity.CRITICAL,
 }
 
 

@@ -15,7 +15,7 @@ SCANS THREE CLASS TYPES:
 - ConsumerStatefulWidget State classes (extends ConsumerState<T>)
 - ConsumerWidget classes (extends ConsumerWidget)
 
-FORBIDDEN PATTERNS DETECTED (17 TYPES):
+FORBIDDEN PATTERNS DETECTED (18 TYPES):
 
 CRITICAL (Will crash in production):
 1. Field caching (nullable/dynamic fields with getters in async classes)
@@ -30,6 +30,7 @@ CRITICAL (Will crash in production):
 10. Sync methods with ref.read() but no mounted check (called from async context)
 11. Ref/WidgetRef stored as field in plain Dart class (not Riverpod notifier/widget)
 12. Ref/WidgetRef passed to a plain Dart class constructor (entry point to the above)
+13. Unguarded ref.read/watch/listen in a top-level @riverpod async* function provider
 
 WARNINGS (High risk of crashes):
 11. Widget lifecycle methods with unsafe ref (didUpdateWidget, deactivate, reassemble)
@@ -93,6 +94,7 @@ from .checkers import (
     check_mounted_confusion,
     check_initstate_field_access,
     check_ref_into_plain_class,
+    check_async_star_function_providers,
 )
 from .output import format_violation_text, print_summary_text, format_json
 
@@ -263,6 +265,12 @@ class RiverpodScanner:
 
         # --- Any plain class taking/storing Ref or WidgetRef (forbidden) ---
         violations.extend(check_ref_into_plain_class(file_path, content, lines))
+
+        # --- Top-level @riverpod async* function providers with an
+        #     unguarded first ref.read/watch/listen ---
+        violations.extend(
+            check_async_star_function_providers(file_path, content, lines)
+        )
 
         # Filter suppressed violations
         suppressed = []

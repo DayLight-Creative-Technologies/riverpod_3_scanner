@@ -12,7 +12,7 @@
 
 ## 🎯 What It Does
 
-Riverpod 3.0 introduced `ref.mounted` to safely handle provider disposal during async operations. This scanner detects **17 types of violations** that can cause production crashes, including:
+Riverpod 3.0 introduced `ref.mounted` to safely handle provider disposal during async operations. This scanner detects **18 types of violations** that can cause production crashes, including:
 
 - ❌ Field caching patterns (pre-Riverpod 3.0 workarounds)
 - ❌ Lazy getters in async classes
@@ -21,6 +21,7 @@ Riverpod 3.0 introduced `ref.mounted` to safely handle provider disposal during 
 - ❌ Sync methods without mounted checks (called from async contexts)
 - ❌ **Ref/WidgetRef stored as field in plain classes** (not Riverpod notifiers)
 - ❌ **Ref/WidgetRef passed to a plain class constructor** (the entry point to the above)
+- ❌ **Unguarded `ref` in an `async*` function provider** (the generator body runs after the provider element is created)
 
 **Features**:
 - ✅ **Zero false positives** via sophisticated call-graph analysis

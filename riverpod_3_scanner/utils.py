@@ -117,6 +117,20 @@ RE_ANY_CLASS_DECL = re.compile(
     r'(?:\s+extends\s+(\w+)(?:<[^>]+>)?)?',
 )
 
+# Top-level @riverpod / @Riverpod(...) Stream function-provider head: the
+# annotation directly above a `Stream<...> name(` signature. Group 1 is the
+# function name. The parameter list end and the `async*` body marker are
+# resolved in code (find_matching_paren + a trailing `async*` check) so that
+# function-typed parameters and non-generator stream providers are handled
+# precisely. Class notifier `build` methods never match — they carry
+# `@override`, not `@riverpod`, and take no `Ref` parameter.
+RE_STREAM_FN_PROVIDER_HEAD = re.compile(
+    r'@(?:riverpod|Riverpod\s*\([^)]*\))\s+'
+    r'Stream<.+?>\s+'
+    r'(\w+)\s*\(',
+    re.DOTALL,
+)
+
 # Suppression comment patterns
 RE_IGNORE_LINE = re.compile(r'//\s*riverpod_scanner:ignore\b')
 RE_IGNORE_FILE = re.compile(r'//\s*riverpod_scanner:ignore-file\b')
