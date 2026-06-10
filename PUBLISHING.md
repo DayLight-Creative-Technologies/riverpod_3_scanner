@@ -31,13 +31,15 @@ That's it. If every step succeeds, you're done. Read on only if something fails.
 
 ## Before You Publish: Version Bump Checklist
 
-Version must be updated in **exactly 3 files** (all must match):
+Version lives in **exactly 1 file** (single source of truth since v1.12.0):
 
 | File | Field |
 |------|-------|
-| `pyproject.toml` | `version = "X.Y.Z"` |
-| `setup.py` | `version="X.Y.Z",` |
 | `riverpod_3_scanner/__init__.py` | `__version__ = "X.Y.Z"` |
+
+`pyproject.toml` reads it dynamically (`[tool.setuptools.dynamic]
+version = {attr = "riverpod_3_scanner.__version__"}`) and `setup.py` is a
+metadata-free shim — do NOT add a version to either of them.
 
 Also update `CHANGELOG.md` with the new version's changes.
 

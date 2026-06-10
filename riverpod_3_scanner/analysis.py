@@ -54,6 +54,12 @@ class AnalysisContext:
         # Pass 2 + 2.5
         self.methods_called_from_async: Set[MethodKey] = set()
 
+        # Memo for resolve_variable_to_class results, keyed by
+        # (file_path_str, variable_name). Resolution searches the full file
+        # content, so a variable resolves identically at every call site in
+        # the same file. Consumed by utils.resolve_method_calls_in_body.
+        self.variable_class_cache: Dict[Tuple[str, str], Optional[str]] = {}
+
     # -- Secondary-index helpers ------------------------------------------
 
     def add_method(self, key: MethodKey, metadata: MethodMetadata) -> None:

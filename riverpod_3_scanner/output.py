@@ -47,7 +47,7 @@ def format_violation_text(violation: Violation) -> str:
     output.append(f"✅ FIX:")
     output.append(violation.fix_instructions)
     output.append(f"")
-    output.append(f"📚 Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md")
+    output.append(f"📚 Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md")
 
     return '\n'.join(output)
 
@@ -124,10 +124,10 @@ def print_summary_text(
         print(f"Next steps:")
         print(f"  1. Fix each violation using Riverpod 3.0 pattern")
         print(f"  2. Run: dart analyze")
-        print(f"  3. Re-run this scanner to verify: python3 riverpod_3_scanner.py lib")
+        print(f"  3. Re-run this scanner to verify: riverpod-3-scanner lib")
         print(f"")
         print(f"📚 Documentation:")
-        print(f"   https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md")
+        print(f"   https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md")
         print(f"   ")
         print(f"")
 

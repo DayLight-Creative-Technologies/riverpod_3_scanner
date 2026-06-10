@@ -12,7 +12,7 @@
 
 ## 🎯 What It Does
 
-Riverpod 3.0 introduced `ref.mounted` to safely handle provider disposal during async operations. This scanner detects **18 types of violations** that can cause production crashes, including:
+Riverpod 3.0 introduced `ref.mounted` to safely handle provider disposal during async operations. This scanner detects **20 types of violations** that can cause production crashes — across Riverpod notifier classes, `ConsumerState`, `ConsumerWidget`, `HookConsumerWidget`, plain classes, and top-level function providers — including:
 
 - ❌ Field caching patterns (pre-Riverpod 3.0 workarounds)
 - ❌ Lazy getters in async classes
@@ -48,19 +48,14 @@ Then run directly:
 riverpod-3-scanner lib
 ```
 
-#### Via Direct Download
+#### Via Git Checkout
 
 ```bash
-# Download scanner
-curl -O https://raw.githubusercontent.com/DayLight-Creative-Technologies/riverpod_3_scanner/main/riverpod_3_scanner.py
-
-# Make executable (optional)
-chmod +x riverpod_3_scanner.py
+git clone https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner.git
+cd riverpod_3_scanner && python3 -m pip install .
 ```
 
 ### Basic Usage
-
-#### If installed via PyPI:
 
 ```bash
 # Scan entire project
@@ -71,20 +66,16 @@ riverpod-3-scanner lib/features/game/notifiers/game_notifier.dart
 
 # Verbose output
 riverpod-3-scanner lib --verbose
+
+# JSON output for CI / tooling
+riverpod-3-scanner lib --format json
+
+# Print version
+riverpod-3-scanner --version
 ```
 
-#### If using direct download:
-
-```bash
-# Scan entire project
-python3 riverpod_3_scanner.py lib
-
-# Scan specific file
-python3 riverpod_3_scanner.py lib/features/game/notifiers/game_notifier.dart
-
-# Verbose output
-python3 riverpod_3_scanner.py lib --verbose
-```
+(Equivalently: `python3 -m riverpod_3_scanner lib` — useful when the
+entry-point script is not on PATH.)
 
 ### Example Output
 
@@ -129,7 +120,7 @@ VIOLATIONS BY TYPE:
 - Untyped var lazy getters (loses type information)
 - mounted vs ref.mounted confusion (educational)
 
-See [GUIDE.md](GUIDE.md) for complete violation reference and fix patterns.
+See [GUIDE.md](docs/GUIDE.md) for complete violation reference and fix patterns.
 
 ---
 
@@ -199,13 +190,13 @@ ref.onDispose(() {
 
 ```bash
 # Scan only notifiers
-python3 riverpod_3_scanner.py lib --pattern "**/*_notifier.dart"
+riverpod-3-scanner lib --pattern "**/*_notifier.dart"
 
 # Scan only widgets
-python3 riverpod_3_scanner.py lib --pattern "**/widgets/**/*.dart"
+riverpod-3-scanner lib --pattern "**/widgets/**/*.dart"
 
 # Scan only services
-python3 riverpod_3_scanner.py lib --pattern "**/services/**/*.dart"
+riverpod-3-scanner lib --pattern "**/services/**/*.dart"
 ```
 
 ### Exit Codes
@@ -216,7 +207,7 @@ python3 riverpod_3_scanner.py lib --pattern "**/services/**/*.dart"
 
 Use in CI/CD pipelines:
 ```bash
-python3 riverpod_3_scanner.py lib || exit 1
+riverpod-3-scanner lib || exit 1
 ```
 
 ---
@@ -233,14 +224,14 @@ jobs:
   riverpod-safety:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
 
-      - name: Download Scanner
-        run: curl -O https://raw.githubusercontent.com/DayLight-Creative-Technologies/riverpod_3_scanner/main/riverpod_3_scanner.py
+      - name: Install Scanner
+        run: python3 -m pip install riverpod-3-scanner
 
       - name: Run Scanner
-        run: python3 riverpod_3_scanner.py lib
+        run: riverpod-3-scanner lib
 
       - name: Dart Analyze
         run: dart analyze lib/
@@ -253,7 +244,7 @@ jobs:
 # .git/hooks/pre-commit
 
 echo "Running Riverpod 3.0 compliance check..."
-python3 riverpod_3_scanner.py lib || exit 1
+riverpod-3-scanner lib || exit 1
 dart analyze lib/ || exit 1
 echo "✅ All checks passed!"
 ```
@@ -267,8 +258,8 @@ chmod +x .git/hooks/pre-commit
 
 ## 📚 Documentation
 
-- **[GUIDE.md](GUIDE.md)** - Complete guide with all violation types, fix patterns, decision trees
-- **[EXAMPLES.md](EXAMPLES.md)** - Real-world examples and production crash case studies
+- **[GUIDE.md](docs/GUIDE.md)** - Complete guide with all violation types, fix patterns, decision trees
+- **[EXAMPLES.md](docs/EXAMPLES.md)** - Real-world examples and production crash case studies
 - **[CHANGELOG.md](CHANGELOG.md)** - Version history and updates
 
 ---
@@ -335,7 +326,7 @@ class MyNotifier extends _$MyNotifier {
 
 ## 🔍 Requirements
 
-- **Python**: 3.7+
+- **Python**: 3.9+
 - **Dart/Flutter**: Any version using Riverpod 3.0+
 - **Riverpod**: 3.0+ (for `ref.mounted` feature)
 

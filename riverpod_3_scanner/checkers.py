@@ -305,7 +305,7 @@ AFTER (SAFE):
 
 Applies to all async methods: {', '.join(ctx.async_methods)}
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md
 Sentry Issue: #7055596134 (iOS production crash)"""
             ))
 
@@ -387,15 +387,21 @@ If using provider directly, check the provider's return type
 
 Applies to all async methods: {', '.join(ctx.async_methods)}
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md"""
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md"""
                 ))
 
     # ------------------------------------------------------------------
     # Collect all fields (nullable, dynamic, late final)
     # ------------------------------------------------------------------
-    generic_field_pattern = re.compile(r'(\w+(?:<.+?>)?)\?\s+(_\w+);', re.DOTALL)
+    # `<[^;]+?>` instead of DOTALL `<.+?>`: a Dart type-argument list can
+    # never contain a `;`, so bounding the lazy scan at the next semicolon
+    # matches every real field declaration while preventing the pathological
+    # backtracking that made this checker the scan's hottest function (the
+    # lazy dot otherwise expands across the entire remaining class body at
+    # every non-matching `identifier<` position).
+    generic_field_pattern = re.compile(r'(\w+(?:<[^;]+?>)?)\?\s+(_\w+);', re.DOTALL)
     dynamic_field_pattern_2 = re.compile(r'\bdynamic\s+(_\w+);')
-    late_final_field_pattern = re.compile(r'late\s+final\s+(\w+(?:<.+?>)?)\??\s+(_\w+);', re.DOTALL)
+    late_final_field_pattern = re.compile(r'late\s+final\s+(\w+(?:<[^;]+?>)?)\??\s+(_\w+);', re.DOTALL)
 
     all_fields: List[Tuple[str, str, int]] = []
     for field_match in generic_field_pattern.finditer(class_content):
@@ -503,7 +509,7 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
     # ------------------------------------------------------------------
     if ctx.has_async_methods:
         bang_getter_pattern = re.compile(
-            r'(\w+(?:<.+?>)?)\s+get\s+(\w+)\s*=>\s*(_\w+)\s*!\s*;',
+            r'(\w+(?:<[^;]+?>)?)\s+get\s+(\w+)\s*=>\s*(_\w+)\s*!\s*;',
             re.DOTALL,
         )
         for getter_match in bang_getter_pattern.finditer(class_content):
@@ -890,7 +896,7 @@ Future<void> {method_name}() async {{
     // ... rest of code
 }}
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
         ))
 
     return violations
@@ -969,7 +975,10 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
 
         # CHECK A: Direct ref operations
         for ref_match in ref_usage_pattern.finditer(callback_content):
-            stripped_pos = ondispose_match.start() + callback_start + ref_match.start()
+            # callback_start is already absolute within the class content;
+            # adding ondispose_match.start() again double-counted the offset
+            # and inflated reported line numbers (fixed in 1.12.0).
+            stripped_pos = callback_start + ref_match.start()
             original_pos = class_position_map.get(stripped_pos, stripped_pos)
             abs_pos = ctx.class_start + original_pos
             abs_line = ctx.full_content[:abs_pos].count('\n') + 1
@@ -995,7 +1004,7 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
             method_call_pattern = re.compile(rf'\b{method_name}\s*\(')
 
             for call_match in method_call_pattern.finditer(callback_content):
-                stripped_pos = ondispose_match.start() + callback_start + call_match.start()
+                stripped_pos = callback_start + call_match.start()
                 original_pos = class_position_map.get(stripped_pos, stripped_pos)
                 abs_pos = ctx.class_start + original_pos
                 abs_line = ctx.full_content[:abs_pos].count('\n') + 1
@@ -1035,7 +1044,7 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
 
             if target_class and target_class in methods_using_ref_db:
                 if method_name in methods_using_ref_db[target_class]:
-                    stripped_pos = ondispose_match.start() + callback_start + call_match.start()
+                    stripped_pos = callback_start + call_match.start()
                     original_pos = class_position_map.get(stripped_pos, stripped_pos)
                     abs_pos = ctx.class_start + original_pos
                     abs_line = ctx.full_content[:abs_pos].count('\n') + 1
@@ -1400,7 +1409,7 @@ OPTION 2: Use ref safely with mounted checks
 
 {option_text}
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
                 ))
 
             # Special check for addPostFrameCallback in didUpdateWidget
@@ -1450,7 +1459,7 @@ AFTER (SAFE):
      }}
    }});
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
                                 ))
 
     return violations
@@ -1529,7 +1538,7 @@ AFTER (SAFE):
      final data = ref.read(provider);
    });
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
     ),
     DeferredCallbackSpec(
         name='Timer',
@@ -1569,7 +1578,7 @@ AFTER (SAFE):
      super.dispose();
    }
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
     ),
     DeferredCallbackSpec(
         name='addPostFrameCallback',
@@ -1606,7 +1615,7 @@ IMPORTANT: Remove lazy getter entirely and use just-in-time ref.read()
    ❌ REMOVE: MyLogger get logger => ref.read(myLoggerProvider);
    ✅ USE: if (!mounted) return; final logger = ref.read(myLoggerProvider);
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md
 Sentry Issue: #7364580c89a044b387aafbb7a997a682 (iOS production crash)""",
     ),
     DeferredCallbackSpec(
@@ -1648,7 +1657,7 @@ BEST PRACTICE: Use async/await instead of .then() for better error handling
      logger.logInfo('Done');
    }
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
     ),
     DeferredCallbackSpec(
         name='.catchError()',
@@ -1677,7 +1686,7 @@ AFTER (SAFE):
      logger.logError('Failed', error: e);
    });
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
     ),
     DeferredCallbackSpec(
         name='.whenComplete()',
@@ -1705,7 +1714,7 @@ AFTER (SAFE):
      logger.logInfo('Complete');
    });
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
     ),
     DeferredCallbackSpec(
         name='Future.microtask',
@@ -1790,7 +1799,7 @@ Pick the right gate for the host:
       adding a `WidgetRef.mounted` extension shim.)
    - ConsumerStatefulWidget.State → `if (!mounted) return;` (State.mounted)
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md
 SSK Async-Surface Taxonomy: .claude/rules/presentation-layer.md
 Sentry Issue: SOCIALSCOREKEEPER-FLUTTER-9CJ""",
     ),
@@ -1831,7 +1840,7 @@ AFTER (SAFE):
 Pick the right gate for the host (see Future.microtask fix instructions
 above for the full surface taxonomy).
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md
 SSK Async-Surface Taxonomy: .claude/rules/presentation-layer.md""",
     ),
 ]
@@ -1986,8 +1995,12 @@ def check_async_event_handlers(ctx: CheckContext) -> List[Violation]:
     violations: List[Violation] = []
 
     for handler in EVENT_HANDLERS:
+        # Matches both zero-parameter (`onTap: () async {`) and parametered
+        # (`onChanged: (value) async {`) handler closures. Until 1.12.0 only
+        # the zero-parameter shape was matched, so every `onChanged`-style
+        # handler (which always receives a value) escaped this check.
         pattern = re.compile(
-            rf'{handler}\s*:\s*\(\)\s*async\s*\{{',
+            rf'{handler}\s*:\s*\(([^)]*)\)\s*async\s*\{{',
             re.DOTALL,
         )
 
@@ -2168,7 +2181,7 @@ AFTER (CLEAR):
    // (Only if class has NO async methods!)
    ProviderType get {base_name} => ref.read(provider);
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
             ))
 
     return violations
@@ -2264,7 +2277,7 @@ NOTE: In ConsumerStatefulWidget:
 - Don't call ref.read() AFTER await without re-checking mounted
 
 Reference: https://riverpod.dev/docs/whats_new#refmounted
-See also: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+See also: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
             ))
 
     return violations
@@ -2437,7 +2450,7 @@ This pattern caused critical production failures:
 - Root cause: Database queries failing due to null backendService
 - Users unable to access revenue-critical features
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md
 See also: Flutter widget lifecycle documentation""",
             ))
             continue
@@ -2529,7 +2542,7 @@ File: lib/presentation/features/game/views/game_chat_view.dart
 - _backendService was null (cached in build())
 - Query failed silently → "You are not a member" error shown
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md""",
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
                 ))
 
     return violations
@@ -2634,7 +2647,7 @@ Resolve them from ref at the provider boundary and pass the resolved values:
       );
 
 Reference: Riverpod async safety — never pass or store ref in plain classes.
-https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md"""
+https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md"""
 
 
 def check_ref_into_plain_class(

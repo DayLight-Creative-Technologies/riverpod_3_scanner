@@ -5,6 +5,49 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-06-10
+
+### Added
+
+- **`HookConsumerWidget` classes are now scanned**: `extends HookConsumerWidget` classes get the async-event-handler and deferred-callback checks — the same profile as `ConsumerWidget`. Hook bodies (`useEffect`) commonly schedule `Future.microtask`, the exact Sentry SOCIALSCOREKEEPER-FLUTTER-9CJ shape, yet these classes were previously invisible to the per-class scan loop entirely.
+- **Parametered async event handlers are now matched**: the event-handler check previously matched only the zero-parameter closure shape (`onTap: () async {`). `onChanged: (value) async {` — and every other handler that receives an argument, which is most of them — escaped the check completely. The pattern now matches any parameter list.
+- **`--version` CLI flag.**
+- **Suppressed-violation count is now reported**: text output prints `🔇 Suppressed violations: N` and JSON output carries a truthful `suppressed_count`. The plumbing existed since 1.4.0 but was never wired — the count was always 0.
+- **pytest suite (55 tests)**: the fixture corpus (now 18 files) is pinned to exact `(violation_type, line)` expectations; parsing utilities, suppression, FileCache degradation, and the CLI (exit codes, JSON shape, `--version`) are covered. Run with `pytest -q`.
+- **GitHub Actions CI**: test matrix on Python 3.9–3.14 plus a build + `twine check` packaging job.
+
+### Fixed
+
+- **String-blind comment stripping (false-negative class)**: both comment strippers treated `//` inside a string literal as a comment start — `final url = 'https://example.com'; ref.read(p);` had everything after `https:` discarded, hiding any violation on the rest of the line. The new unified `blank_comments()` is string-aware (single, double, triple-quoted, and raw strings) and length-preserving: comments are blanked to spaces instead of excised, so every match position in the cleaned text IS the original position and the old position-mapping bookkeeping became the identity.
+- **Field-caching false negative on multi-token generic context (REAL violation found)**: the nullable-field pattern's DOTALL `<.+?>` could lazily expand across several lines of class header and capture a garbage "field type" (e.g. `ConsumerState<SubscriptionChangeFlow> { ... AsyncValue<UserState?>`), so the getter-matching step built from that garbage never matched and the violation vanished. The bounded `<[^;]+?>` (a Dart type-argument list can never contain `;`) captures the true type. Validation on the SocialScoreKeeper codebase surfaced exactly one real, previously-hidden field-caching violation (`_userState ??= ref.read(userProvider)` lazy getter in an async `ConsumerState` class) — confirmed true positive and fixed in that codebase.
+- **Line numbers for `ref.onDispose()` violations were inflated**: the three onDispose sub-checks added the `ref.onDispose` match offset to an already-absolute callback position, double-counting the offset. Reported line numbers for DIRECT, INDIRECT-same-class, and INDIRECT-cross-class onDispose violations are now correct.
+- **Unreadable files no longer abort the scan**: a non-UTF-8, unreadable, or vanished file is reported to stderr once and skipped (the `content is None` guards finally have a producer), instead of crashing the whole run with a traceback.
+- **Broken documentation links**: 21 references to `blob/main/GUIDE.md` (a 404 since the docs moved to `docs/`) in fix-instruction texts, the scanner docstring, and the README now point to `blob/main/docs/GUIDE.md`. The summary footer's stale `python3 riverpod_3_scanner.py lib` re-run hint is now `riverpod-3-scanner lib`.
+- **`install.sh` resurrected**: it still referenced the single-file `riverpod_3_scanner.py` layout retired in v1.4.0 (its self-test could never pass). It now pip-installs the package (local checkout or PyPI) and writes a pre-commit hook that calls the real entry point.
+
+### Performance
+
+- **~4× faster on large codebases** (production validation corpus: 41.5s → 10.3s for 2,651 files). Three independent wins:
+  1. `resolve_variable_to_class` results are memoized per `(file, variable)` on the `AnalysisContext`, and a single cheap prefilter (`var = ref.read(` shape) short-circuits the six pattern searches for the overwhelmingly common unresolvable-variable case — this was 39% of total runtime.
+  2. `blank_comments()` jump-scans between interesting tokens with one compiled regex instead of walking every character in Python and building a per-character position dict (64M list appends eliminated).
+  3. `_find_matching_delimiter` (brace/paren matching) jump-scans the same way; the field-declaration patterns' bounded `<[^;]+?>` also eliminates pathological regex backtracking in `check_field_caching` (was the hottest single function).
+
+### Changed
+
+- **Version single source of truth**: the version now lives ONLY in `riverpod_3_scanner/__init__.py`. `pyproject.toml` reads it dynamically (`[tool.setuptools.dynamic]`) and `setup.py` is a metadata-free shim. The 3-file bump checklist in PUBLISHING.md is now a 1-file checklist.
+- **Python floor raised to 3.9** (3.7 and 3.8 are EOL); classifiers updated through 3.14.
+- **SPDX license metadata** (`license = "MIT"` + `license-files`), replacing the deprecated table form and license classifier.
+- Removed four dead module-level field regexes from `utils.py` (`RE_GENERIC_NULLABLE_FIELD`, `RE_DYNAMIC_FIELD`, `RE_LATE_FINAL_FIELD`, `RE_VAR_FIELD`) — checkers compile their own local copies; the constants had zero consumers.
+
+### Test Fixtures
+
+- Added `tests/fixtures/hook_consumer_widget_violations.dart` (2 violations: unguarded microtask `ref.read` in a hook body; parametered handler `ref` after await) and `hook_consumer_widget_passing.dart` (guarded microtask, guarded parametered handler, sync hook widget — 0 violations).
+- Added `tests/fixtures/event_handler_params_violations.dart` (2 violations: one-parameter `onChanged` and the legacy zero-parameter `onTap` shape, proving the generalization did not regress the old match) and `event_handler_params_passing.dart` (guard-after-await, ref-before-await-only, and synchronous handler — 0 violations).
+
+### Validation
+
+- Tested against the SocialScoreKeeper production codebase (`lib/`, 2,651 files): all 14 pre-existing fixture corpora produce byte-identical expectations; the full scan reports the same result as 1.11.0 (zero violations) **after** the one genuine field-caching violation newly exposed by the `<[^;]+?>` fix was independently confirmed and corrected in that codebase. The two new detection surfaces (HookConsumerWidget, parametered handlers) produced **0 false positives** across the 10 HookConsumerWidget classes and 11 parametered async handlers present there — every one correctly guarded, every one correctly passed.
+
 ## [1.11.0] - 2026-05-22
 
 ### Added

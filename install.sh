@@ -2,14 +2,11 @@
 #
 # Riverpod 3.0 Safety Scanner - Installation Script
 #
-# This script installs the scanner and optionally sets up a pre-commit hook
+# Installs the scanner (from PyPI, or from this checkout when run inside the
+# repo) and optionally sets up a pre-commit hook in your Flutter project.
 #
 
 set -e
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCANNER_FILE="riverpod_3_scanner.py"
-SCANNER_PATH="$SCRIPT_DIR/$SCANNER_FILE"
 
 # Colors for output
 RED='\033[0;31m'
@@ -26,28 +23,29 @@ echo ""
 # Check if Python 3 is installed
 if ! command -v python3 &> /dev/null; then
     echo -e "${RED}❌ Error: Python 3 is required but not installed${NC}"
-    echo "Please install Python 3.7+ and try again"
+    echo "Please install Python 3.9+ and try again"
     exit 1
 fi
 
 PYTHON_VERSION=$(python3 --version | cut -d' ' -f2)
 echo -e "${GREEN}✅ Python found: $PYTHON_VERSION${NC}"
 
-# Check if scanner file exists
-if [ ! -f "$SCANNER_PATH" ]; then
-    echo -e "${RED}❌ Error: Scanner file not found at $SCANNER_PATH${NC}"
-    exit 1
+# Install the package — from this checkout when the script sits next to
+# pyproject.toml, otherwise from PyPI.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/pyproject.toml" ]; then
+    echo -e "${BLUE}Installing from local checkout...${NC}"
+    python3 -m pip install --upgrade "$SCRIPT_DIR"
+else
+    echo -e "${BLUE}Installing from PyPI...${NC}"
+    python3 -m pip install --upgrade riverpod-3-scanner
 fi
-
-# Make scanner executable
-chmod +x "$SCANNER_PATH"
-echo -e "${GREEN}✅ Scanner is executable${NC}"
 
 # Test scanner
 echo ""
 echo -e "${BLUE}Testing scanner...${NC}"
-if python3 "$SCANNER_PATH" --help &> /dev/null; then
-    echo -e "${GREEN}✅ Scanner test passed${NC}"
+if python3 -m riverpod_3_scanner --version &> /dev/null; then
+    echo -e "${GREEN}✅ Scanner test passed ($(python3 -m riverpod_3_scanner --version))${NC}"
 else
     echo -e "${RED}❌ Scanner test failed${NC}"
     exit 1
@@ -58,14 +56,14 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo -e "${GREEN}  Installation Complete!${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${BLUE}Usage:${NC}"
-echo -e "  ${YELLOW}python3 $SCANNER_PATH lib${NC}"
-echo -e "  ${YELLOW}python3 $SCANNER_PATH lib --verbose${NC}"
-echo -e "  ${YELLOW}python3 $SCANNER_PATH lib/features${NC}"
+echo -e "${BLUE}Usage (from your Flutter project root):${NC}"
+echo -e "  ${YELLOW}riverpod-3-scanner lib${NC}"
+echo -e "  ${YELLOW}riverpod-3-scanner lib --verbose${NC}"
+echo -e "  ${YELLOW}riverpod-3-scanner lib --format json${NC}"
 echo ""
 
 # Ask about pre-commit hook
-echo -e "${BLUE}Would you like to set up a pre-commit hook? (y/n)${NC}"
+echo -e "${BLUE}Would you like to set up a pre-commit hook in the current directory's repo? (y/n)${NC}"
 read -r setup_hook
 
 if [ "$setup_hook" = "y" ] || [ "$setup_hook" = "Y" ]; then
@@ -101,21 +99,14 @@ if [ "$setup_hook" = "y" ] || [ "$setup_hook" = "Y" ]; then
 
 echo "Running Riverpod 3.0 compliance check..."
 
-# Find scanner (adjust path if needed)
-SCANNER="riverpod_3_scanner.py"
-
-if [ -f "$SCANNER" ]; then
-    SCANNER_PATH="$SCANNER"
-elif [ -f "docs/packages/riverpod_3_scanner/$SCANNER" ]; then
-    SCANNER_PATH="docs/packages/riverpod_3_scanner/$SCANNER"
+if command -v riverpod-3-scanner &> /dev/null; then
+    SCANNER="riverpod-3-scanner"
 else
-    echo "❌ Scanner not found"
-    echo "Please install scanner or update path in .git/hooks/pre-commit"
-    exit 1
+    SCANNER="python3 -m riverpod_3_scanner"
 fi
 
 # Run scanner
-python3 "$SCANNER_PATH" lib || {
+$SCANNER lib || {
     echo ""
     echo "❌ Riverpod 3.0 violations found!"
     echo "Fix violations before committing."
@@ -148,8 +139,8 @@ fi
 
 echo ""
 echo -e "${BLUE}📚 Documentation:${NC}"
-echo -e "  README.md  - Quick start and features"
-echo -e "  GUIDE.md   - Complete guide with all patterns"
-echo -e "  EXAMPLES.md - Real-world crash case studies"
+echo -e "  README.md        - Quick start and features"
+echo -e "  docs/GUIDE.md    - Complete guide with all patterns"
+echo -e "  docs/EXAMPLES.md - Real-world crash case studies"
 echo ""
 echo -e "${GREEN}Happy coding! 🚀${NC}"

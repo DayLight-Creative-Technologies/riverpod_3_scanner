@@ -9,6 +9,7 @@ inside hot-loop methods.
 """
 
 import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -26,6 +27,9 @@ RE_CONSUMER_STATE_CLASS = re.compile(
 )
 RE_CONSUMER_WIDGET_CLASS = re.compile(
     r'class\s+(\w+)\s+extends\s+ConsumerWidget\b'
+)
+RE_HOOK_CONSUMER_WIDGET_CLASS = re.compile(
+    r'class\s+(\w+)\s+extends\s+HookConsumerWidget\b'
 )
 
 # Async method signatures
@@ -86,16 +90,6 @@ RE_RETURN_AWAIT = re.compile(r'\breturn\s+await\s+')
 RE_RIVERPOD_ANNOTATION = re.compile(
     r'@[Rr]iverpod.*?\nclass\s+(\w+)\s+extends', re.DOTALL
 )
-
-# Field patterns
-RE_GENERIC_NULLABLE_FIELD = re.compile(
-    r'(\w+(?:<.+?>)?)\?\s+(_\w+);', re.DOTALL
-)
-RE_DYNAMIC_FIELD = re.compile(r'\bdynamic\s+(_\w+);')
-RE_LATE_FINAL_FIELD = re.compile(
-    r'late\s+final\s+(\w+(?:<.+?>)?)\??\s+(_\w+);', re.DOTALL
-)
-RE_VAR_FIELD = re.compile(r'\bvar\s+(_\w+);')
 
 # Build method and widget helper patterns
 RE_BUILD_METHOD = re.compile(
@@ -176,23 +170,32 @@ class FileCache:
 
     def __init__(self) -> None:
         """Initialize an empty file cache."""
-        self._text_cache: Dict[Path, str] = {}
+        self._text_cache: Dict[Path, Optional[str]] = {}
         self._lines_cache: Dict[Path, List[str]] = {}
 
-    def read_text(self, path: Path) -> str:
+    def read_text(self, path: Path) -> Optional[str]:
         """Read a file's full text content, returning cached copy if available.
+
+        An unreadable file (permissions, missing, non-UTF-8 bytes) is reported
+        to stderr once and cached as ``None`` so the scan degrades to skipping
+        that file instead of aborting the whole run. Every caller already
+        checks for ``None`` before analyzing.
 
         Args:
             path: Absolute path to the file.
 
         Returns:
-            The file's text content.
-
-        Raises:
-            OSError: If the file cannot be read.
+            The file's text content, or ``None`` if the file cannot be read.
         """
         if path not in self._text_cache:
-            self._text_cache[path] = path.read_text(encoding='utf-8')
+            try:
+                self._text_cache[path] = path.read_text(encoding='utf-8')
+            except (OSError, UnicodeDecodeError) as exc:
+                print(
+                    f"⚠️  Skipping unreadable file {path}: {exc}",
+                    file=sys.stderr,
+                )
+                self._text_cache[path] = None
         return self._text_cache[path]
 
     def read_lines(self, path: Path) -> List[str]:
@@ -202,14 +205,11 @@ class FileCache:
             path: Absolute path to the file.
 
         Returns:
-            List of lines (split on newline).
-
-        Raises:
-            OSError: If the file cannot be read.
+            List of lines (split on newline). Empty for an unreadable file.
         """
         if path not in self._lines_cache:
             text = self.read_text(path)
-            self._lines_cache[path] = text.split('\n')
+            self._lines_cache[path] = text.split('\n') if text is not None else []
         return self._lines_cache[path]
 
     def clear(self) -> None:
@@ -221,6 +221,14 @@ class FileCache:
 # =============================================================================
 # 4. String-aware Dart parsing
 # =============================================================================
+
+# Jump-scan patterns for delimiter matching: instead of inspecting every
+# character in Python, search for the next "interesting" token (delimiter,
+# comment start, or string start) and let the regex engine skip the plain
+# code between tokens at C speed.
+_RE_BRACE_SPECIAL = re.compile(r'[{}]|//|/\*|r?[\'"]')
+_RE_PAREN_SPECIAL = re.compile(r'[()]|//|/\*|r?[\'"]')
+
 
 def _find_matching_delimiter(
     content: str,
@@ -245,53 +253,46 @@ def _find_matching_delimiter(
     Returns:
         Position of the matching closing delimiter, or len(content) if not found.
     """
+    special = _RE_BRACE_SPECIAL if open_ch == '{' else _RE_PAREN_SPECIAL
     depth = 1
     length = len(content)
     i = start
 
-    while i < length and depth > 0:
-        ch = content[i]
+    while i < length:
+        m = special.search(content, i)
+        if m is None:
+            return length
 
-        # --- Single-line comment ---
-        if ch == '/' and i + 1 < length:
-            next_ch = content[i + 1]
-            if next_ch == '/':
-                # Skip to end of line
-                nl = content.find('\n', i + 2)
-                i = nl + 1 if nl != -1 else length
-                continue
-            if next_ch == '*':
-                # Multi-line comment: skip to */
-                end = content.find('*/', i + 2)
-                i = end + 2 if end != -1 else length
-                continue
+        pos = m.start()
+        token = m.group(0)
 
-        # --- Raw strings (r'...' or r"...") ---
-        if ch == 'r' and i + 1 < length and content[i + 1] in ("'", '"'):
-            i = _skip_raw_string(content, i + 1, length)
-            continue
-
-        # --- Triple-quoted strings ---
-        if ch in ("'", '"') and i + 2 < length:
-            triple = ch * 3
-            if content[i:i + 3] == triple:
-                i = _skip_triple_string(content, i, length, triple)
-                continue
-
-        # --- Single-quoted or double-quoted strings ---
-        if ch in ("'", '"'):
-            i = _skip_simple_string(content, i, length, ch)
-            continue
-
-        # --- Delimiter counting ---
-        if ch == open_ch:
+        if token == '//':
+            nl = content.find('\n', pos + 2)
+            i = nl + 1 if nl != -1 else length
+        elif token == '/*':
+            end = content.find('*/', pos + 2)
+            i = end + 2 if end != -1 else length
+        elif token in ("r'", 'r"'):
+            # Raw-string candidate. If the 'r' is the tail of an identifier,
+            # re-scan from the quote character itself.
+            if pos > 0 and (content[pos - 1].isalnum() or content[pos - 1] == '_'):
+                i = pos + 1
+            else:
+                i = _skip_raw_string(content, pos + 1, length)
+        elif token in ("'", '"'):
+            triple = token * 3
+            if content.startswith(triple, pos):
+                i = _skip_triple_string(content, pos, length, triple)
+            else:
+                i = _skip_simple_string(content, pos, length, token)
+        elif token == open_ch:
             depth += 1
-        elif ch == close_ch:
+            i = pos + 1
+        else:  # token == close_ch
             depth -= 1
             if depth == 0:
-                return i
-
-        i += 1
+                return pos
+            i = pos + 1
 
     return length
 
@@ -494,96 +495,125 @@ def find_statement_end(content: str, start: int) -> int:
 
 
 # =============================================================================
-# 5. Comment stripping (unified)
+# 5. Comment blanking (unified, string-aware, length-preserving)
 # =============================================================================
 
+# The next "interesting" token while scanning Dart code left-to-right:
+# a single-line comment start, a block comment start, or a (possibly raw)
+# string-literal start. Everything between tokens is plain code that can be
+# copied through verbatim in one slice.
+_RE_CODE_SPECIAL = re.compile(r'//|/\*|r?[\'"]')
+
+
+def blank_comments(content: str) -> str:
+    """Replace Dart comments with whitespace, preserving length and lines.
+
+    String-aware: a ``//`` or ``/*`` inside a string literal (single, double,
+    triple-quoted, or raw) is string content, NOT a comment — the prior
+    regex-based stripper treated ``'https://example.com'`` as a comment start
+    and silently discarded the rest of the line, which could hide a violation
+    appearing after the literal.
+
+    Length-preserving: every comment character is replaced by a space (newlines
+    inside block comments are kept), so every index in the result equals its
+    index in the original. Checkers therefore need no position mapping — a
+    match position in the blanked text IS the original position.
+
+    Args:
+        content: Raw Dart source code (full file or fragment).
+
+    Returns:
+        Same-length string with all comment characters blanked to spaces.
+    """
+    parts: List[str] = []
+    i = 0
+    length = len(content)
+
+    while i < length:
+        m = _RE_CODE_SPECIAL.search(content, i)
+        if m is None:
+            parts.append(content[i:])
+            break
+
+        start = m.start()
+        if start > i:
+            parts.append(content[i:start])
+
+        token = m.group(0)
+        if token == '//':
+            j = content.find('\n', start + 2)
+            if j == -1:
+                j = length
+            parts.append(' ' * (j - start))
+            i = j
+        elif token == '/*':
+            j = content.find('*/', start + 2)
+            j = length if j == -1 else j + 2
+            segment = content[start:j]
+            parts.append(
+                ''.join('\n' if c == '\n' else ' ' for c in segment)
+            )
+            i = j
+        elif token[0] == 'r':
+            # Raw-string candidate. If the 'r' is actually the tail of an
+            # identifier (e.g. `var str'` is invalid Dart, but be safe), emit
+            # the 'r' and rescan from the quote.
+            if start > 0 and (content[start - 1].isalnum() or content[start - 1] == '_'):
+                parts.append('r')
+                i = start + 1
+            else:
+                j = _skip_raw_string(content, start + 1, length)
+                parts.append(content[start:j])
+                i = j
+        else:
+            # Simple or triple-quoted string — copied through verbatim.
+            quote = token
+            if content.startswith(quote * 3, start):
+                j = _skip_triple_string(content, start, length, quote * 3)
+            else:
+                j = _skip_simple_string(content, start, length, quote)
+            parts.append(content[start:j])
+            i = j
+
+    return ''.join(parts)
+
+
 def strip_comments(content: str) -> Tuple[str, Dict[int, int]]:
-    """Strip comments from Dart code while preserving position mapping.
+    """Blank comments from Dart code; positions are preserved.
 
-    Removes both single-line (//) and multi-line (/* */) comments. Newlines
-    inside multi-line comments are preserved to keep line numbers accurate.
-    Builds a position map from stripped-content positions back to original
-    positions for accurate violation line-number reporting.
+    Since 1.12.0 this delegates to :func:`blank_comments` — comments are
+    replaced with whitespace rather than excised, so the result has the SAME
+    length as the input and every position maps to itself. The returned map is
+    therefore empty; callers' ``position_map.get(i, i)`` fallback is the
+    identity, which is now always correct.
 
-    This is the position-preserving variant used by checkers that need to map
-    stripped positions back to original line numbers.
+    Kept as a wrapper so the (content, position_map) call sites need no churn.
 
     Args:
         content: Raw Dart source code.
 
     Returns:
-        A tuple of (stripped_content, position_map) where position_map maps
-        each index in stripped_content to its corresponding index in the
-        original content.
+        A tuple of (blanked_content, empty_position_map).
     """
-    position_map: Dict[int, int] = {}
-    stripped_parts: List[str] = []
-    stripped_pos = 0
-    i = 0
-    length = len(content)
-
-    while i < length:
-        # Single-line comment
-        if i < length - 1 and content[i:i + 2] == '//':
-            while i < length and content[i] != '\n':
-                i += 1
-            # Keep the newline to preserve line numbers
-            if i < length:
-                stripped_parts.append('\n')
-                position_map[stripped_pos] = i
-                stripped_pos += 1
-                i += 1
-            continue
-
-        # Multi-line comment
-        if i < length - 1 and content[i:i + 2] == '/*':
-            i += 2
-            while i < length - 1:
-                if content[i:i + 2] == '*/':
-                    i += 2
-                    break
-                # Preserve newlines for line-number accuracy
-                if content[i] == '\n':
-                    stripped_parts.append('\n')
-                    position_map[stripped_pos] = i
-                    stripped_pos += 1
-                i += 1
-            else:
-                # Reached end without closing */
-                if i < length and content[i] == '\n':
-                    stripped_parts.append('\n')
-                    position_map[stripped_pos] = i
-                    stripped_pos += 1
-                i += 1
-            continue
-
-        # Regular character
-        stripped_parts.append(content[i])
-        position_map[stripped_pos] = i
-        stripped_pos += 1
-        i += 1
-
-    return ''.join(stripped_parts), position_map
+    return blank_comments(content), {}
 
 
 def remove_comments(code: str) -> str:
-    """Remove single-line and multi-line comments from Dart code.
+    """Blank single-line and multi-line comments from Dart code.
 
-    This is the simple regex-based variant used when position mapping is not
-    needed (e.g., checking whether a method body contains a specific pattern
-    without caring about exact line numbers).
+    Since 1.12.0 this delegates to :func:`blank_comments`, which is
+    string-aware: a ``//`` inside a string literal no longer deletes the rest
+    of the line. Comments are blanked to spaces (same-length result) rather
+    than removed — all callers use the result for presence/ordering checks,
+    which are insensitive to that difference.
 
     Args:
         code: Dart source code (possibly a fragment).
 
     Returns:
-        The code with all comments removed.
+        Same-length code with all comment characters blanked.
     """
-    # Remove multi-line comments first (greedy within DOTALL)
-    code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
-    # Remove single-line comments
-    code = re.sub(r'//.*?$', '', code, flags=re.MULTILINE)
-    return code
+    return blank_comments(code)
 
 
 # =============================================================================
@@ -758,6 +788,17 @@ def resolve_variable_to_class(
     """
     search_content = full_content if full_content else class_content
 
+    # Fast prefilter: every declaration pattern below contains the shape
+    # `<variable> <spaces>= ref.read(`. If that shape is absent from the
+    # search content, none of the six pattern searches can match — one cheap
+    # search replaces six expensive ones for the (overwhelmingly common)
+    # unresolvable-variable case.
+    prefilter = re.compile(
+        rf'{re.escape(variable_name)}\s*=\s*ref\.read\('
+    )
+    if not prefilter.search(search_content):
+        return None
+
     # Pattern 1: final Type variable = ref.read(provider(...).notifier)
     pat = re.compile(
         rf'(\w+)\s+{re.escape(variable_name)}'
@@ -852,6 +893,14 @@ def resolve_method_calls_in_body(
     """
     file_path_str = str(file_path)
 
+    # Per-(file, variable) memo on the AnalysisContext. Resolution searches
+    # the FULL file content, so the result is identical for every call site
+    # in the same file — and the same object names (logger, notifier, ...)
+    # recur across dozens of callbacks per file.
+    cache: Optional[Dict[Tuple[str, str], Optional[str]]] = getattr(
+        ctx, 'variable_class_cache', None
+    )
+
     for call_match in RE_METHOD_CALL.finditer(callback_body):
         called_method = (
             call_match.group(2) if call_match.group(2)
@@ -867,9 +916,21 @@ def resolve_method_calls_in_body(
 
         if object_name:
             # Qualified call: object.method() -- resolve object to class
-            resolved_class = resolve_variable_to_class(
-                object_name, class_content, full_content, ctx.provider_to_class
-            )
+            if cache is not None:
+                cache_key = (file_path_str, object_name)
+                if cache_key in cache:
+                    resolved_class = cache[cache_key]
+                else:
+                    resolved_class = resolve_variable_to_class(
+                        object_name, class_content, full_content,
+                        ctx.provider_to_class,
+                    )
+                    cache[cache_key] = resolved_class
+            else:
+                resolved_class = resolve_variable_to_class(
+                    object_name, class_content, full_content,
+                    ctx.provider_to_class,
+                )
             if resolved_class:
                 # Use O(1) secondary index from AnalysisContext
                 key = ctx.lookup_method(resolved_class, called_method)

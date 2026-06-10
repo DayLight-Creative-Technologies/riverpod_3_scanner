@@ -6,40 +6,47 @@ Comprehensive static analysis tool for Flutter/Dart projects using Riverpod 3.0+
 Author: Steven Day
 Company: DayLight Creative Technologies
 License: MIT
-Version: 1.5.0
 
 Detects ALL forbidden patterns that violate Riverpod 3.0 async safety standards.
 
-SCANS THREE CLASS TYPES:
+SCANS FOUR CLASS TYPES (plus two file-scope surfaces):
 - Riverpod provider classes (extends _$ClassName)
 - ConsumerStatefulWidget State classes (extends ConsumerState<T>)
 - ConsumerWidget classes (extends ConsumerWidget)
+- HookConsumerWidget classes (extends HookConsumerWidget)
+- File scope: plain classes taking/storing Ref, and top-level @riverpod
+  async* function providers
 
-FORBIDDEN PATTERNS DETECTED (18 TYPES):
+FORBIDDEN PATTERNS DETECTED (20 violation types — see models.ViolationType):
 
 CRITICAL (Will crash in production):
-1. Field caching (nullable/dynamic fields with getters in async classes)
-2. Lazy getters (get x => ref.read()) in async classes
-3. Async getters with field caching
-4. ref operation (read/watch/listen) before ref.mounted check
-5. Missing ref.mounted after await
-6. Missing ref.mounted in catch blocks
-7. Nullable field direct access (_field?.method()) when getter exists
-8. ref operations inside lifecycle callbacks (ref.onDispose, ref.listen)
-9. initState field access before caching (accessing cached fields before build() caches them)
-10. Sync methods with ref.read() but no mounted check (called from async context)
-11. Ref/WidgetRef stored as field in plain Dart class (not Riverpod notifier/widget)
-12. Ref/WidgetRef passed to a plain Dart class constructor (entry point to the above)
-13. Unguarded ref.read/watch/listen in a top-level @riverpod async* function provider
+- Field caching (nullable/dynamic fields with getters in async classes)
+- Lazy getters (get x => ref.read()) in async classes
+- Async getters with field caching
+- ref operation (read/watch/listen) before ref.mounted check
+- Missing ref.mounted after await; state assigned directly from await
+- Missing ref.mounted in catch blocks
+- Nullable field direct access (_field?.method()) when getter exists
+- ref operations inside lifecycle callbacks (ref.onDispose, ref.listen)
+- ref.listen outside build()
+- initState field access before caching (fields only cached in build())
+- Sync methods with ref.read() but no mounted check (called from async context)
+- Ref/WidgetRef stored as field in plain Dart class (not Riverpod notifier/widget)
+- Ref/WidgetRef passed to a plain Dart class constructor (entry point to the above)
+- Unguarded ref.read/watch/listen in a top-level @riverpod async* function provider
+- Off-frame callbacks (Future.microtask, scheduleMicrotask, addPostFrameCallback,
+  .then/.catchError/.whenComplete) using ref without a mounted guard
 
 WARNINGS (High risk of crashes):
-11. Widget lifecycle methods with unsafe ref (didUpdateWidget, deactivate, reassemble)
-12. Timer/Future.delayed deferred callbacks without mounted checks
-13. Async event handler callbacks without mounted checks (onTap, onPressed, etc.)
+- ref.watch outside build()
+- Widget lifecycle methods with unsafe ref (didUpdateWidget, deactivate, reassemble)
+- Timer/Future.delayed deferred callbacks without mounted checks
+- Async event handler callbacks without mounted checks (onTap, onPressed,
+  onChanged, ... — both `() async {}` and `(value) async {}` shapes)
 
 DEFENSIVE (Type safety & best practices):
-14. Untyped var lazy getters (loses type information)
-15. mounted vs ref.mounted confusion (educational - different lifecycles)
+- Untyped var lazy getters (loses type information)
+- mounted vs ref.mounted confusion (educational - different lifecycles)
 
 SPECIAL FEATURES:
 - Type inference for dynamic fields (suggests proper types)
@@ -47,7 +54,8 @@ SPECIAL FEATURES:
 - Inline suppression comments (// riverpod_scanner:ignore)
 - JSON output format for CI/CD integration (--format json)
 - File caching for performance (each file read once)
-- String-aware brace counting (correct handling of string literals)
+- String-aware brace counting AND comment blanking (a // inside a string
+  literal is never treated as a comment)
 
 CORRECT PATTERN (Riverpod 3.0):
   Future<void> myMethod() async {
@@ -59,7 +67,7 @@ CORRECT PATTERN (Riverpod 3.0):
     logger.logInfo('Done');
   }
 
-Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/GUIDE.md
+Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md
 """
 
 import argparse
@@ -67,6 +75,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from . import __version__
 from .models import Violation, ViolationType
 from .utils import (
     FileCache,
@@ -77,6 +86,7 @@ from .utils import (
     RE_PROVIDER_CLASS,
     RE_CONSUMER_STATE_CLASS,
     RE_CONSUMER_WIDGET_CLASS,
+    RE_HOOK_CONSUMER_WIDGET_CLASS,
 )
 from .analysis import AnalysisContext, run_all_passes
 from .checkers import (
@@ -112,6 +122,11 @@ class RiverpodScanner:
 
         # Cross-file analysis state (populated by run_all_passes)
         self._ctx: Optional[AnalysisContext] = None
+
+        # Count of violations silenced via inline suppression comments,
+        # accumulated across scan_file calls. Reported in text and JSON
+        # output so suppressions stay visible instead of vanishing.
+        self.suppressed_count = 0
 
     # ------------------------------------------------------------------
     # Public API (backward compatible)
@@ -263,6 +278,40 @@ class RiverpodScanner:
             violations.extend(check_async_event_handlers(ctx))
             violations.extend(check_deferred_callbacks(ctx))
 
+        # --- HookConsumerWidget classes (extends HookConsumerWidget) ---
+        # Same async-surface profile as ConsumerWidget: WidgetRef has no
+        # `mounted` getter, so callbacks and off-frame closures in the build
+        # body must guard with `context.mounted`. Hook bodies (useEffect)
+        # commonly schedule Future.microtask — the exact Sentry 9CJ shape —
+        # so these classes get the event-handler and deferred-callback checks.
+        for match in RE_HOOK_CONSUMER_WIDGET_CLASS.finditer(content):
+            class_name = match.group(1)
+            class_start = match.start()
+            brace_pos = content.find('{', match.end())
+            if brace_pos == -1:
+                continue
+            class_end = find_matching_brace(content, brace_pos + 1)
+            class_content = content[class_start:class_end + 1]
+
+            if self.verbose:
+                print(f"\n\U0001f50d Analyzing {class_name} (HookConsumerWidget):")
+
+            ctx = CheckContext(
+                file_path=file_path,
+                class_name=class_name,
+                class_content=class_content,
+                full_content=content,
+                class_start=class_start,
+                lines=lines,
+                has_async_methods=False,
+                async_methods=[],
+                is_consumer_state=False,
+                analysis=self._ctx,
+            )
+
+            violations.extend(check_async_event_handlers(ctx))
+            violations.extend(check_deferred_callbacks(ctx))
+
         # --- Any plain class taking/storing Ref or WidgetRef (forbidden) ---
         violations.extend(check_ref_into_plain_class(file_path, content, lines))
 
@@ -281,6 +330,8 @@ class RiverpodScanner:
             else:
                 kept.append(v)
 
+        self.suppressed_count += len(suppressed)
+
         if self.verbose and suppressed:
             print(f"   \U0001f507 Suppressed {len(suppressed)} violation(s) via inline comments")
 
@@ -293,6 +344,7 @@ class RiverpodScanner:
     ) -> List[Violation]:
         """Scan all Dart files in a directory with comprehensive cross-file analysis."""
         violations: List[Violation] = []
+        self.suppressed_count = 0
 
         dart_files = [
             f for f in directory.glob(pattern)
@@ -381,6 +433,11 @@ Exit codes:
         default='text',
         help='Output format (default: text)',
     )
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=f'%(prog)s {__version__}',
+    )
 
     args = parser.parse_args()
 
@@ -397,9 +454,9 @@ Exit codes:
         violations = scanner.scan_directory(path, args.pattern)
 
     if args.format == 'json':
-        print(format_json(violations, path))
+        print(format_json(violations, path, scanner.suppressed_count))
     else:
-        print_summary_text(violations, path)
+        print_summary_text(violations, path, scanner.suppressed_count)
 
     if violations:
         sys.exit(1)
