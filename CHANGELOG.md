@@ -5,6 +5,16 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.1] - 2026-07-08
+
+### Fixed
+
+- **`check_build_listen_sync_state_mutation` — eliminated two false-positive classes** (SocialScoreKeeper gap #386). The checker flagged two shapes that cannot cause a build-phase crash because no `state =` runs synchronously:
+  - **`state =` inside a `Timer` / `Timer.periodic` callback.** Timer callbacks are dispatched by the event loop and never run synchronously mid-build, so a `state =` inside one is off-frame — exactly like the `Future.microtask` / `addPostFrameCallback` wrappers already stripped. `Timer(` and `Timer.periodic` are now stripped by `_strip_deferred_regions` (a poll-arming helper whose only `state =` lived in its `Timer.periodic` callback was being flagged). The stripping now also carries a word-boundary guard so a wrapper token that is the tail of a longer identifier (`_pollTimer(`, `myFuture(`) is not mistaken for a deferral construct.
+  - **Control-flow keywords treated as method calls + local variables named `state`.** The same-class-call recursion matched `if (`, `for (`, `catch (`, … as if they were method names, then resolved them (via a loose name lookup) to unrelated `if (…) { … }` blocks — one of which held a local `final state = …`. Two fixes: (1) Dart reserved words are never recursed into as calls; (2) `state =` detection now rejects the notifier-state look-alikes — local declarations (`final state = …`, `var state = …`, `<Type> state = …`) and member assignments on other objects (`obj.state = …`, while keeping `this.state = …`).
+  - These changes only *remove* false positives; every genuinely-dangerous shape (a synchronous `state =` reachable directly or through a real same-class method) is still flagged. Verified against SocialScoreKeeper: the 28 genuine sites remain detected (until deferred), and exactly the 2 false positives drop.
+- **4 new regression tests** (Timer-callback, local-`state` shadow, member-`state` assignment, control-flow-keyword). Suite: 75 tests.
+
 ## [1.13.0] - 2026-07-08
 
 ### Added

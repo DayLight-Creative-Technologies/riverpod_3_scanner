@@ -1158,13 +1158,37 @@ _RE_LEADING_IDENT = re.compile(r'\s*([A-Za-z_]\w*)')
 _RE_TEAROFF = re.compile(r'(?:this\.)?(_?\w+)\Z')
 # Off-frame deferral wrappers: code inside their argument list runs AFTER the
 # current synchronous frame, so a `state =` there is not a build-phase mutation.
+# `Timer(...)` / `Timer.periodic(...)` callbacks are dispatched by the event loop
+# and NEVER run synchronously either, so a `state =` inside one is off-frame just
+# like the Future wrappers (omitting them false-flagged poll-arming helpers whose
+# only `state =` lives in a Timer callback — gap #386).
 _DEFER_WRAPPERS = (
     'Future.microtask',
     'Future.delayed',
     'scheduleMicrotask',
     'addPostFrameCallback',
     'Future(',
+    'Timer.periodic',
+    'Timer(',
 )
+
+# Dart reserved words. None can be a method name, so a `keyword(` inside a
+# callback body (`if (`, `for (`, `while (`, `switch (`, `catch (`, ...) is a
+# control-flow construct, not a same-class method call. Recursing into them via a
+# name lookup spuriously matched unrelated `if (...) { ... }` blocks whose bodies
+# held a local `final state = ...` (gap #386). Excluded from the call recursion.
+_DART_KEYWORDS = frozenset({
+    'assert', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue',
+    'default', 'do', 'else', 'enum', 'extends', 'false', 'final', 'finally',
+    'for', 'if', 'in', 'is', 'new', 'null', 'rethrow', 'return', 'super',
+    'switch', 'this', 'throw', 'true', 'try', 'var', 'void', 'while', 'with',
+    'yield',
+})
+
+# `final`/`var`/`const`/`late state = ...` and `<Type> state = ...` are LOCAL
+# variable declarations, not the notifier's state setter. Used to reject them.
+_DECL_KEYWORDS = frozenset({'final', 'var', 'const', 'late'})
+_LOWER_PRIMITIVE_TYPES = frozenset({'int', 'double', 'bool', 'num', 'void', 'dynamic'})
 
 
 def _split_top_level_args(inner: str) -> List[str]:
@@ -1223,6 +1247,10 @@ def _strip_deferred_regions(body: str) -> str:
     n = len(body)
     while i < n:
         wrapper = next((w for w in _DEFER_WRAPPERS if body.startswith(w, i)), None)
+        # A wrapper token preceded by an identifier char is the tail of a longer
+        # name (`_pollTimer(`, `myFuture(`), not a deferral construct — keep it.
+        if wrapper is not None and i > 0 and (body[i - 1].isalnum() or body[i - 1] == '_'):
+            wrapper = None
         if wrapper is None:
             out.append(body[i])
             i += 1
@@ -1259,6 +1287,41 @@ def _same_class_method_body(class_content: str, method_name: str) -> Optional[st
     return class_content[body_start:body_end]
 
 
+def _region_assigns_notifier_state(region: str) -> bool:
+    """True if *region* contains a genuine notifier ``state =`` assignment.
+
+    Rejects the two look-alikes that are NOT the notifier's state setter:
+    - LOCAL declarations — ``final state = ...``, ``var state = ...``,
+      ``PascalType state = ...``, ``int state = ...`` (a `final state = next.value`
+      local false-flagged an unrelated callback — gap #386).
+    - MEMBER assignments on another object — ``foo.state = ...`` (but ``this.state``
+      IS the notifier's state).
+    """
+    for m in _RE_STATE_ASSIGN.finditer(region):
+        i = m.start()
+        before = region[:i].rstrip()
+        # `obj.state = ...` is a field on another object; only `this.state` is ours.
+        if before.endswith('.') and not before.endswith('this.'):
+            continue
+        # Inspect the token immediately before `state` on the same line (skip only
+        # spaces/tabs — a `;`/`{`/newline before `state` means it's a statement).
+        j = i - 1
+        while j >= 0 and region[j] in ' \t':
+            j -= 1
+        end = j + 1
+        while j >= 0 and (region[j].isalnum() or region[j] == '_'):
+            j -= 1
+        prev = region[j + 1:end]
+        if prev in _DECL_KEYWORDS:
+            continue
+        # A capitalized identifier or lowercase primitive immediately before
+        # `state` is its declared type (`Foo state = ...`), not an assignment.
+        if prev and (prev[0].isupper() or prev in _LOWER_PRIMITIVE_TYPES):
+            continue
+        return True
+    return False
+
+
 def _sync_assigns_state(
     body: str, class_content: str, visited: Set[str]
 ) -> bool:
@@ -1266,11 +1329,12 @@ def _sync_assigns_state(
     same-class method it calls synchronously (following calls, skipping
     off-frame-deferred and post-await regions)."""
     sync_region = _strip_deferred_regions(body)
-    if _RE_STATE_ASSIGN.search(sync_region):
+    if _region_assigns_notifier_state(sync_region):
         return True
     for call in _RE_SAME_CLASS_CALL.finditer(sync_region):
         name = call.group(1)
-        if name in visited:
+        # Dart reserved words are control-flow constructs, never method names.
+        if name in _DART_KEYWORDS or name in visited:
             continue
         visited.add(name)
         callee_body = _same_class_method_body(class_content, name)

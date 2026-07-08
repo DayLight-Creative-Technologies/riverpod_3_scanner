@@ -283,6 +283,120 @@ class PresenceNotifier extends _$PresenceNotifier {
     assert _scan(tmp_path, listener, SYNC_IMPERATIVE_PROVIDER) == []
 
 
+def test_state_assignment_only_inside_timer_callback_is_not_flagged(tmp_path):
+    # realtime_readiness shape (gap #386, Defect A): the connectivity listener
+    # arms a poll timer whose callback sets state. Timer / Timer.periodic
+    # callbacks are dispatched by the event loop and never run synchronously
+    # mid-build, so the `state = true` is off-frame — must NOT be flagged.
+    listener = """\
+import 'dart:async';
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+@riverpod
+class ReadinessNotifier extends _$ReadinessNotifier {
+  Timer? _pollTimer;
+  @override
+  bool build() {
+    ref.listen(teamListProvider, (previous, next) => _onChanged(previous, next));
+    return false;
+  }
+  void _onChanged(TeamListState? previous, TeamListState next) {
+    if (!ref.mounted) return;
+    _armPoll();
+  }
+  void _armPoll() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+      if (!ref.mounted) return;
+      state = true;
+      _pollTimer?.cancel();
+    });
+  }
+}
+"""
+    assert _scan(tmp_path, listener, SYNC_REACTIVE_PROVIDER) == []
+
+
+def test_local_variable_named_state_is_not_flagged(tmp_path):
+    # A `final state = ...` local (shadowing the notifier's `state`) is NOT the
+    # notifier's state setter (gap #386, Defect B root).
+    listener = """\
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+@riverpod
+class ShadowNotifier extends _$ShadowNotifier {
+  @override
+  ShadowState build() {
+    ref.listen(teamListProvider, (previous, next) {
+      if (!ref.mounted) return;
+      final state = next.items;
+      _log(state.length);
+    });
+    return const ShadowState();
+  }
+  void _log(int n) {}
+}
+"""
+    assert _scan(tmp_path, listener, SYNC_REACTIVE_PROVIDER) == []
+
+
+def test_member_state_assignment_on_other_object_is_not_flagged(tmp_path):
+    # `otherObject.state = ...` assigns a field on a different object, not the
+    # notifier's own state (gap #386, Defect B).
+    listener = """\
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+@riverpod
+class MemberNotifier extends _$MemberNotifier {
+  final _machine = _Machine();
+  @override
+  MemberState build() {
+    ref.listen(teamListProvider, (previous, next) {
+      if (!ref.mounted) return;
+      _machine.state = next.items.length;
+    });
+    return const MemberState();
+  }
+}
+"""
+    assert _scan(tmp_path, listener, SYNC_REACTIVE_PROVIDER) == []
+
+
+def test_control_flow_keyword_is_not_recursed_as_a_method_call(tmp_path):
+    # subscription_purchase shape (gap #386, Defect B): the flagged callback only
+    # resets fields, but its body contains `if (`. An earlier listener in the
+    # class has an `if (...) {` block holding a `final state = ...` local. The
+    # `if` keyword must NOT be treated as a same-class method call reaching it.
+    listener = """\
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+@riverpod
+class PurchaseNotifier extends _$PurchaseNotifier {
+  int _failureCount = 0;
+  @override
+  PurchaseState build() {
+    ref.listen(entitlementStreamProvider, (previous, next) {
+      if (previous == null) {
+        final state = next;
+        _log(state);
+      }
+    });
+    ref.listen(teamListProvider, (previous, next) {
+      if (next.items.isEmpty) {
+        _resetCircuitBreaker();
+      }
+    });
+    return const PurchaseState();
+  }
+  void _resetCircuitBreaker() {
+    _failureCount = 0;
+  }
+  void _log(Object? o) {}
+}
+"""
+    assert _scan(tmp_path, listener, SYNC_REACTIVE_PROVIDER) == []
+
+
 def test_single_file_scan_does_not_flag_without_cross_file_analysis(tmp_path):
     # scan_file (no passes) can't resolve provider async-ness/reactivity, so the
     # checker conservatively no-ops — it never flags what it cannot prove.
