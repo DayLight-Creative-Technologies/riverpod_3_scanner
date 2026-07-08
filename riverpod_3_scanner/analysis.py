@@ -18,13 +18,79 @@ from typing import Dict, Set, List, Optional, Tuple
 
 from .models import MethodKey, MethodMetadata
 from .utils import (
-    FileCache, find_matching_brace, find_async_methods, find_methods_using_ref,
+    FileCache, find_matching_brace, find_matching_paren,
+    find_async_methods, find_methods_using_ref,
     resolve_variable_to_class, resolve_method_calls_in_body, remove_comments,
     RE_PROVIDER_CLASS, RE_CONSUMER_STATE_CLASS, RE_METHOD, RE_REF_READ,
     RE_MOUNTED_PROVIDER, RE_MOUNTED_WIDGET, RE_MOUNTED_ANY,
     RE_METHOD_CALL, RE_CALLBACK_START, RE_AWAIT, RE_RIVERPOD_ANNOTATION,
     SKIP_METHODS, FRAMEWORK_LIFECYCLE_METHODS, ASYNC_CALLBACK_PARAMS,
 )
+
+
+# ---------------------------------------------------------------------------
+# Provider value async-ness classification (Pass 1)
+# ---------------------------------------------------------------------------
+# A provider whose build()/function return-type HEAD is one of these yields an
+# AsyncValue/Stream/Future — a value that never flushes a *new* result
+# synchronously during a widget build, so `ref.listen`-ing it is build-phase
+# safe. Any other head (a plain state class, List, int, ...) is a SYNC provider,
+# which CAN be flushed + notify synchronously mid-build.
+_ASYNC_RETURN_HEADS = frozenset({'AsyncValue', 'Stream', 'Future', 'FutureOr'})
+
+# Notifier build(): `[@override] <Head>[<generics>][?] build([...]) [async[*]] {`
+# or an arrow body `... build([...]) => expr`. Group 1 = the return-type head
+# token (e.g. TeamListState, AsyncValue, Future).
+_RE_BUILD_RETURN = re.compile(
+    r'(?:@override\s+)?([A-Za-z_]\w*)[\w<>,\s\?]*?\s+build\s*\([^)]*\)\s*(?:async[\s*]*)?(?:\{|=>)'
+)
+
+# Function provider: `@riverpod[(...)] <Head>[<generics>] <name>(Ref ...)`.
+# Group 1 = return-type head, group 2 = function name (→ `<name>Provider`).
+_RE_FUNCTION_PROVIDER = re.compile(
+    r'@[Rr]iverpod(?:\s*\([^)]*\))?\s+([A-Za-z_]\w*)[\w<>,\s\?]*?\s+([a-z]\w*)\s*\(\s*Ref\b'
+)
+
+
+def _classify_return_async(head_type: str) -> bool:
+    """True if a provider return-type head denotes an async (AsyncValue/Stream/
+    Future) value; False for a plain synchronous value."""
+    return head_type in _ASYNC_RETURN_HEADS
+
+
+def _extract_build_body(content: str, build_match: 're.Match') -> str:
+    """Return the body text of a build() method (braced body between its braces,
+    or an arrow body up to its terminating ';'). ``content`` should be
+    comment-stripped."""
+    end = build_match.end()
+    if build_match.group(0).rstrip().endswith('{'):
+        close = find_matching_brace(content, end)
+        return content[end:close]
+    semi = content.find(';', end)
+    return content[end:semi if semi != -1 else len(content)]
+
+
+def _extract_function_provider_body(content: str, fn_match: 're.Match') -> str:
+    """Return the body text of a function provider (`@riverpod T name(Ref ...)`)
+    for reactivity inspection. Skips the parameter list, then returns the braced
+    body or the arrow expression up to ';'. ``content`` should be
+    comment-stripped."""
+    paren = content.rfind('(', fn_match.start(), fn_match.end())
+    if paren == -1:
+        return ''
+    close = find_matching_paren(content, paren + 1)
+    if close is None or close < 0:
+        return ''
+    rest = close + 1
+    brace = content.find('{', rest)
+    arrow = content.find('=>', rest)
+    if arrow != -1 and (brace == -1 or arrow < brace):
+        semi = content.find(';', arrow)
+        return content[arrow + 2:semi if semi != -1 else len(content)]
+    if brace != -1:
+        body_close = find_matching_brace(content, brace + 1)
+        return content[brace + 1:body_close]
+    return ''
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +112,25 @@ class AnalysisContext:
         self.methods_using_ref: Dict[str, Set[str]] = {}   # class_name -> method names
         self.class_to_file: Dict[str, Path] = {}            # class_name -> file path
         self.provider_to_class: Dict[str, str] = {}         # provider_name -> class_name
+        # provider_name -> is the provider's value an AsyncValue/Stream/Future
+        # (True) or a plain synchronous value (False). Consumed by
+        # check_build_listen_sync_state_mutation: a `ref.listen` on a SYNC
+        # provider can fire synchronously mid-build (the provider is flushed
+        # when read dirty during a widget build), so a callback that mutates
+        # `state` synchronously crashes with a build-phase provider modification;
+        # an ASYNC provider (StreamProvider/FutureProvider/AsyncNotifier) never
+        # flushes a *new* value synchronously mid-build, so it is safe. Providers
+        # absent from this map are UNKNOWN (unresolvable) and are treated as safe
+        # (conservative — never flag what we cannot prove is sync).
+        self.provider_is_async: Dict[str, bool] = {}        # provider_name -> is_async
+        # provider_name -> does build()/the provider function `ref.watch` a
+        # dependency (i.e. is it REACTIVE — can be marked dirty and flushed +
+        # notify synchronously when read mid-build). An imperative notifier
+        # (updated only via its own methods from external events, no ref.watch)
+        # is never dirtied by a dependency, so it never flushes mid-build and is
+        # safe to `ref.listen` even from a state-mutating callback. Absent =
+        # unknown = treated as NOT reactive (conservative — never flag).
+        self.provider_build_reactive: Dict[str, bool] = {}  # provider_name -> reactive
 
         # Pass 1.5
         self.all_methods: Dict[MethodKey, MethodMetadata] = {}
@@ -190,6 +275,11 @@ def _pass1_build_ref_database(file_path: Path, ctx: AnalysisContext) -> None:
     if content is None:
         return
 
+    # class_name -> build() value async / build() reactive (this file only);
+    # consumed by the annotation loop below to key the provider maps.
+    file_class_build_async: Dict[str, bool] = {}
+    file_class_build_reactive: Dict[str, bool] = {}
+
     # --- Riverpod provider classes (extends _$ClassName) ---
     for provider_match in RE_PROVIDER_CLASS.finditer(content):
         class_name = provider_match.group(1)
@@ -200,6 +290,18 @@ def _pass1_build_ref_database(file_path: Path, ctx: AnalysisContext) -> None:
         methods_with_ref = find_methods_using_ref(class_content)
         if methods_with_ref:
             ctx.methods_using_ref[class_name] = methods_with_ref
+
+        # Classify the notifier's build() value (async vs sync) AND whether
+        # build() is reactive (ref.watch-derived). Comment-stripped so a
+        # commented-out signature or ref.watch never wins.
+        clean_class = remove_comments(class_content)
+        build_match = _RE_BUILD_RETURN.search(clean_class)
+        if build_match:
+            file_class_build_async[class_name] = _classify_return_async(
+                build_match.group(1)
+            )
+            build_body = _extract_build_body(clean_class, build_match)
+            file_class_build_reactive[class_name] = 'ref.watch(' in build_body
 
     # --- ConsumerStatefulWidget State classes (extends ConsumerState<T>) ---
     for consumer_match in RE_CONSUMER_STATE_CLASS.finditer(content):
@@ -226,6 +328,30 @@ def _pass1_build_ref_database(file_path: Path, ctx: AnalysisContext) -> None:
 
         provider_name = base_name[0].lower() + base_name[1:] + 'Provider'
         ctx.provider_to_class[provider_name] = class_name
+        if class_name in file_class_build_async:
+            ctx.provider_is_async[provider_name] = file_class_build_async[class_name]
+        if class_name in file_class_build_reactive:
+            ctx.provider_build_reactive[provider_name] = \
+                file_class_build_reactive[class_name]
+
+    # --- Function providers (@riverpod ReturnType xxx(Ref ref, ...)) ---
+    # Not class-based, so absent from provider_to_class; classified here for
+    # build-listen safety (e.g. `List<GameEntity> gamesByTournament(...)` → sync;
+    # `Stream<X> effectiveBaseballRules(...)` → async).
+    clean_content = remove_comments(content)
+    for fn_match in _RE_FUNCTION_PROVIDER.finditer(clean_content):
+        head_type = fn_match.group(1)
+        fn_name = fn_match.group(2)
+        provider_name = fn_name + 'Provider'
+        # A class provider already resolved wins (never let a stray function-
+        # shaped match clobber a notifier classification).
+        ctx.provider_is_async.setdefault(
+            provider_name, _classify_return_async(head_type)
+        )
+        fn_body = _extract_function_provider_body(clean_content, fn_match)
+        ctx.provider_build_reactive.setdefault(
+            provider_name, 'ref.watch(' in fn_body
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -71,9 +71,11 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
 """
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from . import __version__
 from .models import Violation, ViolationType
@@ -105,6 +107,7 @@ from .checkers import (
     check_initstate_field_access,
     check_ref_into_plain_class,
     check_async_star_function_providers,
+    check_build_listen_sync_state_mutation,
 )
 from .output import format_violation_text, print_summary_text, format_json
 
@@ -197,6 +200,11 @@ class RiverpodScanner:
             # false-positive on captured-parameter patterns common in
             # service-class notifiers.
             violations.extend(check_deferred_callbacks(ctx, notifier_scope=True))
+            # Build-phase provider modification: a build()-registered ref.listen
+            # on a SYNC provider whose callback mutates state synchronously
+            # (SocialScoreKeeper gaps #376/#381). Needs cross-file async-ness, so
+            # it no-ops on standalone single-file scans.
+            violations.extend(check_build_listen_sync_state_mutation(ctx))
 
         # --- ConsumerStatefulWidget State classes (extends ConsumerState<T>) ---
         for match in RE_CONSUMER_STATE_CLASS.finditer(content):
@@ -387,6 +395,39 @@ class RiverpodScanner:
 
 
 # ======================================================================
+# Baseline support — adopt the scanner on a codebase with pre-existing
+# violations. A baseline is a remove-only ledger of ACCEPTED (path, line,
+# type) signatures: matching violations are suppressed, so the scan fails
+# only on NEW violations. Fixing a baselined site leaves a STALE entry
+# (reported, never a failure — pruning it is the remove-only discipline).
+# ======================================================================
+
+def _baseline_key(violation: Violation, root: Path) -> str:
+    """Stable signature for a violation: '<path-relative-to-root>:<line>:<type>'.
+    Root-relative so the ledger is portable across checkouts/worktrees."""
+    try:
+        rel = os.path.relpath(violation.file_path, str(root))
+    except ValueError:
+        rel = str(violation.file_path)
+    return f"{rel}:{violation.line_number}:{violation.violation_type.value}"
+
+
+def _load_baseline(baseline_path: Path) -> Set[str]:
+    """Load a baseline ledger (JSON list of signature strings)."""
+    data = json.loads(baseline_path.read_text())
+    if not isinstance(data, list):
+        raise ValueError(
+            f"Baseline {baseline_path} must be a JSON list of signature strings"
+        )
+    return set(data)
+
+
+def _write_baseline(baseline_path: Path, keys: List[str]) -> None:
+    """Write a baseline ledger (sorted JSON list) for the given signatures."""
+    baseline_path.write_text(json.dumps(sorted(set(keys)), indent=2) + "\n")
+
+
+# ======================================================================
 # CLI entry point
 # ======================================================================
 
@@ -434,6 +475,23 @@ Exit codes:
         help='Output format (default: text)',
     )
     parser.add_argument(
+        '--baseline',
+        type=str,
+        default=None,
+        metavar='FILE',
+        help='Remove-only baseline ledger (JSON): suppress its accepted '
+             'violations so the scan fails only on NEW ones. Stale entries are '
+             'reported, never a failure.',
+    )
+    parser.add_argument(
+        '--write-baseline',
+        type=str,
+        default=None,
+        metavar='FILE',
+        help='Write the current violations to FILE as a baseline ledger and '
+             'exit 0 (regenerate an accepted baseline).',
+    )
+    parser.add_argument(
         '--version',
         action='version',
         version=f'%(prog)s {__version__}',
@@ -452,6 +510,49 @@ Exit codes:
         violations = scanner.scan_file(path)
     else:
         violations = scanner.scan_directory(path, args.pattern)
+
+    # Baseline root: signatures are relative to the scanned directory (or the
+    # file's parent) so the ledger is stable across checkouts.
+    root = path if path.is_dir() else path.parent
+
+    # Regenerate an accepted baseline and exit.
+    if args.write_baseline is not None:
+        keys = [_baseline_key(v, root) for v in violations]
+        _write_baseline(Path(args.write_baseline), keys)
+        print(
+            f"Wrote baseline with {len(set(keys))} accepted signature(s) "
+            f"to {args.write_baseline}"
+        )
+        sys.exit(0)
+
+    # Apply a baseline: suppress accepted violations, fail only on new ones.
+    if args.baseline is not None:
+        baseline = _load_baseline(Path(args.baseline))
+        new_violations = [
+            v for v in violations if _baseline_key(v, root) not in baseline
+        ]
+        present_keys = {_baseline_key(v, root) for v in violations}
+        stale = sorted(baseline - present_keys)
+        suppressed = len(violations) - len(new_violations)
+
+        if args.format == 'json':
+            print(format_json(new_violations, path, scanner.suppressed_count))
+        else:
+            print_summary_text(new_violations, path, scanner.suppressed_count)
+            if suppressed:
+                print(
+                    f"\nℹ️  {suppressed} baselined violation(s) suppressed "
+                    f"(remove-only ledger: {args.baseline})."
+                )
+            if stale:
+                print(
+                    f"\n⚠️  {len(stale)} STALE baseline entr"
+                    f"{'y' if len(stale) == 1 else 'ies'} — the violation is gone; "
+                    f"prune (remove-only):"
+                )
+                for s in stale:
+                    print(f"     {s}")
+        sys.exit(1 if new_violations else 0)
 
     if args.format == 'json':
         print(format_json(violations, path, scanner.suppressed_count))

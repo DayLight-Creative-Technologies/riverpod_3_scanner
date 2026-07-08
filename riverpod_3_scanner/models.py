@@ -38,6 +38,7 @@ class ViolationType(Enum):
     REF_PASSED_TO_PLAIN_CLASS = "ref_passed_to_plain_class"
     STATE_ASSIGN_AWAIT = "state_assign_await"
     ASYNC_STAR_REF_BEFORE_MOUNTED = "async_star_ref_before_mounted"
+    BUILD_LISTEN_SYNC_STATE_MUTATION = "build_listen_sync_state_mutation"
 
 
 VIOLATION_SEVERITY = {
@@ -61,6 +62,7 @@ VIOLATION_SEVERITY = {
     ViolationType.REF_PASSED_TO_PLAIN_CLASS: Severity.CRITICAL,
     ViolationType.STATE_ASSIGN_AWAIT: Severity.CRITICAL,
     ViolationType.ASYNC_STAR_REF_BEFORE_MOUNTED: Severity.CRITICAL,
+    ViolationType.BUILD_LISTEN_SYNC_STATE_MUTATION: Severity.CRITICAL,
 }
 
 

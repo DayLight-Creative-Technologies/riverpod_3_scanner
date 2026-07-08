@@ -1125,6 +1125,281 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
 
 
 # ===========================================================================
+# CHECKER: check_build_listen_sync_state_mutation
+# ===========================================================================
+#
+# Flags a `ref.listen(<SYNC provider>, <callback>)` in a notifier whose callback
+# mutates `state` SYNCHRONOUSLY (directly, or via a same-class helper it calls
+# synchronously) without deferring off-frame.
+#
+# Why it crashes: a SYNC provider (build() returns a plain value, not
+# AsyncValue/Stream/Future) is flushed + notifies its listeners SYNCHRONOUSLY
+# when a widget reads it dirty during a build. If the listener assigns `state`,
+# that mutation lands inside the build/layout frame → "Tried to modify a
+# provider while the widget tree was building". The fix is to defer the
+# mutation (Future.microtask / addPostFrameCallback / after an await), or to
+# migrate the notifier to a pure reactive `ref.watch` derivation.
+#
+# Regression origin (SocialScoreKeeper, 2026-07-08, gaps #376/#381): a reactive
+# list-notifier migration turned upstream providers (teamListProvider, ...) from
+# async-notify seeds into `ref.watch`-derived SYNC notifiers, exposing the
+# dormant imperative `ref.listen -> state =` pattern in downstream form
+# notifiers.
+#
+# Soundness: only providers PROVABLY sync (analysis.provider_is_async is False)
+# are considered. Async providers (StreamProvider/FutureProvider/AsyncNotifier —
+# gallery, notification feed) never fire a new value synchronously mid-build, so
+# they are safe; unresolvable providers are skipped. We never flag what we
+# cannot prove is sync.
+
+_RE_STATE_ASSIGN = re.compile(r'\bstate\s*=(?!=)')
+_RE_SAME_CLASS_CALL = re.compile(r'\b(\w+)\s*\(')
+_RE_LEADING_IDENT = re.compile(r'\s*([A-Za-z_]\w*)')
+_RE_TEAROFF = re.compile(r'(?:this\.)?(_?\w+)\Z')
+# Off-frame deferral wrappers: code inside their argument list runs AFTER the
+# current synchronous frame, so a `state =` there is not a build-phase mutation.
+_DEFER_WRAPPERS = (
+    'Future.microtask',
+    'Future.delayed',
+    'scheduleMicrotask',
+    'addPostFrameCallback',
+    'Future(',
+)
+
+
+def _split_top_level_args(inner: str) -> List[str]:
+    """Split a call's argument text on depth-0 commas (paren/brace/bracket and
+    string aware)."""
+    args: List[str] = []
+    depth = 0
+    cur: List[str] = []
+    i = 0
+    n = len(inner)
+    while i < n:
+        c = inner[i]
+        if c in ('"', "'"):
+            # Skip the whole string literal (no escape-handling needed for our
+            # coarse split; Dart callback args rarely embed quotes anyway).
+            cur.append(c)
+            i += 1
+            while i < n and inner[i] != c:
+                cur.append(inner[i])
+                i += 1
+            if i < n:
+                cur.append(inner[i])
+                i += 1
+            continue
+        if c in '([{':
+            depth += 1
+        elif c in ')]}':
+            depth -= 1
+        elif c == ',' and depth == 0:
+            args.append(''.join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    if cur:
+        args.append(''.join(cur))
+    return args
+
+
+def _strip_deferred_regions(body: str) -> str:
+    """Return the SYNCHRONOUS, non-deferred prefix of a callback body.
+
+    Cuts everything from the first top-level ``await`` onward (off the sync
+    stack) and blanks out every Future.microtask / Future.delayed /
+    scheduleMicrotask / addPostFrameCallback / Future(...) call span (their
+    closures run off-frame). What remains executes synchronously in the same
+    call stack as the listener notification.
+    """
+    await_match = re.search(r'\bawait\b', body)
+    if await_match:
+        body = body[:await_match.start()]
+
+    out: List[str] = []
+    i = 0
+    n = len(body)
+    while i < n:
+        wrapper = next((w for w in _DEFER_WRAPPERS if body.startswith(w, i)), None)
+        if wrapper is None:
+            out.append(body[i])
+            i += 1
+            continue
+        paren = body.find('(', i + len(wrapper) - 1)
+        if paren == -1:
+            out.append(body[i])
+            i += 1
+            continue
+        close = find_matching_paren(body, paren + 1)
+        if close is None or close <= paren:
+            out.append(body[i])
+            i += 1
+            continue
+        i = close + 1  # skip the entire wrapper(...) span
+    return ''.join(out)
+
+
+def _same_class_method_body(class_content: str, method_name: str) -> Optional[str]:
+    """Return the brace-matched body of a same-class method, or None.
+
+    Matches ``[@override] <ReturnType> <name>([...]) [async[*]] {`` and returns
+    the text between the braces. Caller should pass comment-stripped content.
+    """
+    pat = re.compile(
+        r'(?:@override\s+)?[\w<>,\s\?]*?\b' + re.escape(method_name) +
+        r'\s*\([^)]*\)\s*(?:async[\s*]*)?\{'
+    )
+    m = pat.search(class_content)
+    if not m:
+        return None
+    body_start = m.end()  # just after '{'
+    body_end = find_matching_brace(class_content, body_start)
+    return class_content[body_start:body_end]
+
+
+def _sync_assigns_state(
+    body: str, class_content: str, visited: Set[str]
+) -> bool:
+    """True if *body* synchronously assigns `state` — directly, or via a
+    same-class method it calls synchronously (following calls, skipping
+    off-frame-deferred and post-await regions)."""
+    sync_region = _strip_deferred_regions(body)
+    if _RE_STATE_ASSIGN.search(sync_region):
+        return True
+    for call in _RE_SAME_CLASS_CALL.finditer(sync_region):
+        name = call.group(1)
+        if name in visited:
+            continue
+        visited.add(name)
+        callee_body = _same_class_method_body(class_content, name)
+        if callee_body is not None and _sync_assigns_state(
+            callee_body, class_content, visited
+        ):
+            return True
+    return False
+
+
+def _extract_listen_callback_body(
+    callback: str, class_content: str
+) -> Optional[str]:
+    """Resolve a `ref.listen` callback to its body text.
+
+    Handles a block lambda ``(a, b) { ... }``, an arrow lambda
+    ``(a, b) => expr``, and a bare tear-off ``_onChanged`` (resolved to the
+    same-class method body). Returns None if it cannot be resolved.
+    """
+    callback = callback.strip()
+    brace = callback.find('{')
+    arrow = callback.find('=>')
+    # Block lambda: a '{' that opens the body (before any '=>').
+    if brace != -1 and (arrow == -1 or brace < arrow):
+        end = find_matching_brace(callback, brace + 1)
+        return callback[brace + 1:end]
+    # Arrow lambda: expression body.
+    if arrow != -1:
+        return callback[arrow + 2:]
+    # Tear-off: bare (optionally this-qualified) identifier.
+    m = _RE_TEAROFF.match(callback)
+    if m:
+        return _same_class_method_body(class_content, m.group(1))
+    return None
+
+
+def _get_build_listen_fix(provider: str) -> str:
+    """Fix instructions for a build-phase sync state mutation via ref.listen."""
+    return (
+        f"A `ref.listen({provider}, ...)` callback registered in a notifier must "
+        f"NOT mutate `state` synchronously — {provider} is a SYNCHRONOUS provider "
+        f"that Riverpod flushes + notifies during a widget build, so the mutation "
+        f"lands inside the build/layout frame ('Tried to modify a provider while "
+        f"the widget tree was building').\n\n"
+        f"Fix (pick one):\n"
+        f"  1. Defer off-frame — wrap the callback body in\n"
+        f"       Future.microtask(() {{ if (!ref.mounted) return; /* state = ... */ }});\n"
+        f"     with the mounted guard as the microtask's first statement.\n"
+        f"  2. If the whole notifier state derives from streams, migrate build() to\n"
+        f"     a pure `ref.watch(...)` reactive projection (drop the imperative\n"
+        f"     ref.listen + state = entirely)."
+    )
+
+
+def check_build_listen_sync_state_mutation(ctx: CheckContext) -> List[Violation]:
+    """Flag build()-registered `ref.listen` on a SYNC provider whose callback
+    mutates `state` synchronously (build-phase provider modification crash)."""
+    violations: List[Violation] = []
+
+    # Requires cross-file analysis to know a provider's async-ness. Standalone
+    # single-file scans have no such data, so nothing is flagged (conservative).
+    if ctx.analysis is None or not ctx.analysis.provider_is_async:
+        return violations
+    provider_is_async = ctx.analysis.provider_is_async
+
+    stripped, position_map = strip_comments(ctx.class_content)
+    class_content_clean = remove_comments(ctx.class_content)
+
+    for listen_match in re.finditer(r'\bref\.listen\s*(?:<[^>]*>)?\s*\(', stripped):
+        paren_open = stripped.rfind('(', listen_match.start(), listen_match.end())
+        if paren_open == -1:
+            continue
+        paren_close = find_matching_paren(stripped, paren_open + 1)
+        if paren_close is None or paren_close <= paren_open:
+            continue
+
+        args = _split_top_level_args(stripped[paren_open + 1:paren_close])
+        if len(args) < 2:
+            continue
+        provider_ref = args[0].strip()
+        callback = args[1].strip()
+
+        head = _RE_LEADING_IDENT.match(provider_ref)
+        if not head:
+            continue
+        base_provider = head.group(1)
+        # Dangerous only if the provider is PROVABLY sync-valued AND reactive
+        # (ref.watch-derived, so it can be flushed + notify SYNCHRONOUSLY when
+        # read dirty mid-build). Async providers never flush a new value
+        # mid-build; imperative sync notifiers (no ref.watch in build — updated
+        # only via their own methods from external events) are never dirtied by
+        # a dependency, so they never flush mid-build; unresolvable providers we
+        # cannot prove. All three are safe.
+        if provider_is_async.get(base_provider) is not False:
+            continue
+        if ctx.analysis.provider_build_reactive.get(base_provider) is not True:
+            continue
+
+        body = _extract_listen_callback_body(callback, class_content_clean)
+        if body is None:
+            continue
+
+        if not _sync_assigns_state(body, class_content_clean, set()):
+            continue
+
+        stripped_pos = listen_match.start()
+        original_pos = position_map.get(stripped_pos, stripped_pos)
+        abs_pos = ctx.class_start + original_pos
+        abs_line = get_abs_line(ctx.full_content, abs_pos)
+
+        violations.append(Violation(
+            file_path=str(ctx.file_path),
+            class_name=ctx.class_name,
+            violation_type=ViolationType.BUILD_LISTEN_SYNC_STATE_MUTATION,
+            line_number=abs_line,
+            context=(
+                f"ref.listen({base_provider}, ...) callback mutates `state` "
+                f"synchronously — {base_provider} is a SYNC provider that can flush "
+                f"+ notify during a widget build, causing a build-phase provider "
+                f"modification crash."
+            ),
+            code_snippet=extract_snippet(ctx.lines, abs_line),
+            fix_instructions=_get_build_listen_fix(base_provider),
+        ))
+
+    return violations
+
+
+# ===========================================================================
 # CHECKER 6: check_ref_operations_outside_build
 # ===========================================================================
 

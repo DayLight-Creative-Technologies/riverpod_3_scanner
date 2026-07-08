@@ -5,6 +5,17 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-07-08
+
+### Added
+
+- **New checker `check_build_listen_sync_state_mutation`** (severity: CRITICAL). Flags a `ref.listen(P, callback)` registered in a notifier whose callback mutates `state` **synchronously** when `P` is a **synchronous + reactive** provider. Such a provider (`build()` returns a plain value — not `AsyncValue`/`Stream`/`Future` — AND `ref.watch`es a dependency) is flushed and notifies its listeners **synchronously** when it is read while dirty during a widget build; a listener that assigns `state` then lands the mutation inside the build/layout frame → Flutter's `Tried to modify a provider while the widget tree was building` assertion. Origin: SocialScoreKeeper gaps #376/#381/#386 — a reactive list-notifier migration turned upstream providers from async-notify seeds into `ref.watch`-derived sync notifiers, exposing the dormant imperative `ref.listen -> state =` pattern in downstream notifiers.
+  - **Sound by construction (two provider gates + a reachability gate).** A listen is flagged only when *all* hold: (1) the listened provider's value is **sync** (async providers never flush a *new* value mid-build); (2) the provider's `build()` is **reactive** — it `ref.watch`es something (an *imperative* sync notifier, updated only by its own methods from external events, is never dirtied by a dependency, so it never flushes mid-build); (3) the callback reaches a `state =` assignment **synchronously** — directly, or via a same-class helper it calls — with the deferred regions (`Future.microtask` / `Future.delayed` / `scheduleMicrotask` / `addPostFrameCallback` / `Future(...)`) and everything after the first `await` removed. Async providers, `.select` on async providers, imperative sync notifiers, off-frame-deferred mutations, and unresolvable providers are all excluded (never flag what cannot be proven dangerous).
+  - **Analysis-layer additions**: Pass 1 now classifies every provider's value async-ness (`provider_is_async`) and build reactivity (`provider_build_reactive`) — for notifier classes (`build()` return type + body) and function providers (`@riverpod T name(Ref …)` return type + body), tolerating both braced and arrow bodies.
+  - Requires cross-file analysis (`scan_directory`); a standalone `scan_file` cannot resolve a provider defined in another file, so the checker conservatively no-ops there.
+- **`--baseline FILE` / `--write-baseline FILE`** — adopt the scanner on a codebase with pre-existing violations. A baseline is a remove-only ledger of accepted `path:line:type` signatures (root-relative, portable across checkouts). `--baseline` suppresses accepted violations so the scan fails only on **new** ones; **stale** entries (the violation is gone) are reported but never a failure. `--write-baseline` regenerates the ledger from the current scan and exits 0.
+- **16 new tests** (10 for the checker across dangerous/safe shapes, 6 for the baseline ledger). Suite: 71 tests.
+
 ## [1.12.0] - 2026-06-10
 
 ### Added
