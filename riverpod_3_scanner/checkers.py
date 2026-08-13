@@ -614,7 +614,27 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         first_10_lines = '\n'.join(method_lines[:10])
         first_10_lines_no_comments = remove_comments(first_10_lines)
 
-        ref_operation_match = re.search(r'ref\.(read|watch|listen)\(', first_10_lines_no_comments)
+        # VIOLATION 4 is an ENTRY-GUARD check: a method that can be *resumed*
+        # on an already-disposed provider must guard before it touches ref.
+        # build() has no entry to guard. The framework calls it while the
+        # provider is being CREATED, so ref is mounted by definition and a
+        # pre-await `ref.watch` / `ref.listen` there cannot throw
+        # UnmountedRefException. Flagging it demanded dead defensive code — an
+        # `if (!ref.mounted) return null;` at the top of a build for a state
+        # that cannot occur — and there is no alternative idiom to fall back
+        # on: declaring a reactive dependency REQUIRES ref.watch inside build().
+        #
+        # The genuinely dangerous shape in build() is NOT lost. A ref op after
+        # an await is still caught by VIOLATION 5 below, which scans every
+        # await in the same method body (build() included) and requires a
+        # mounted check after it. This exclusion is symmetric with the
+        # state-access one directly beneath, and narrows the checker only where
+        # it could not be describing a real crash.
+        ref_operation_match = None
+        if method_name != 'build':
+            ref_operation_match = re.search(
+                r'ref\.(read|watch|listen)\(', first_10_lines_no_comments
+            )
 
         # Also detect state access (state = or state.) as ref-equivalent.
         # Accessing `state` on a disposed notifier throws UnmountedRefException.

@@ -25,6 +25,16 @@ EXPECTED = {
         ("async_star_ref_before_mounted", 37),
         ("async_star_ref_before_mounted", 45),
     ],
+    # build() is exempt from the ENTRY-GUARD check (VIOLATION 4) — the
+    # framework calls it while the provider is being created, so a pre-await
+    # ref op cannot throw. The violations fixture pins that the dangerous
+    # shapes are still caught: a ref op AFTER an await inside build() (owned by
+    # VIOLATION 5) and the ordinary non-build entry-guard miss. SSK gap #728.
+    "build_ref_op_passing.dart": [],
+    "build_ref_op_violations.dart": [
+        ("missing_mounted_after_await", 23),
+        ("ref_read_before_mounted", 40),
+    ],
     "catch_block_passing.dart": [],
     "catch_block_violations.dart": [
         ("missing_mounted_in_catch", 20),

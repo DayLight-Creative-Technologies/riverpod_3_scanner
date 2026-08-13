@@ -5,6 +5,16 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.2] - 2026-08-12
+
+### Fixed
+
+- **`ref_read_before_mounted` — eliminated the `build()` false-positive class** (SocialScoreKeeper gap #728). VIOLATION 4 flagged `ref.read` / `ref.watch` / `ref.listen` appearing in the first 10 lines of an async `build()` with no preceding `if (!ref.mounted) return;`. That check is an **entry-guard** check — it exists for a method that can be *resumed* on an already-disposed provider — and `build()` has no entry to guard: the framework calls it while the provider is being **created**, so `ref` is mounted by definition and a pre-await ref operation there cannot throw `UnmountedRefException`.
+  - The report was not merely noisy, it was **unactionable**: satisfying it required dead defensive code (`if (!ref.mounted) return null;` at the top of a build, guarding a state that cannot occur), and there is no alternative idiom to fall back on — declaring a reactive dependency *requires* `ref.watch` inside `build()`. A codebase doing the canonical thing could not get to a green scan.
+  - `build()` was already excluded from this same violation's **state-access** half ("Skip build() — its return value IS the state"); the ref-operation half simply never received the symmetric treatment.
+  - **No real bug class is lost.** A ref operation *after* an await inside `build()` — the genuinely dangerous shape, where the provider may have been disposed during the gap — is owned by VIOLATION 5 (`missing_mounted_after_await`), which scans every `await` in the same method body with no method-name gate, `build()` included. The new violations fixture pins exactly that, so the exclusion cannot quietly become a blind spot.
+- **2 new fixtures, pinned both directions**: `build_ref_op_passing.dart` (async `build()` opening with `ref.watch` / `ref.read` / `ref.listen`, plus a guarded non-build method to prove the exclusion is scoped) and `build_ref_op_violations.dart` (a ref op after an await inside `build()` → still flagged by VIOLATION 5; a non-build method missing its entry guard → still flagged by VIOLATION 4). Suite: 77 tests.
+
 ## [1.13.1] - 2026-07-08
 
 ### Fixed
