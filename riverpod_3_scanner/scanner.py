@@ -108,6 +108,7 @@ from .checkers import (
     check_ref_into_plain_class,
     check_async_star_function_providers,
     check_build_listen_sync_state_mutation,
+    check_log_after_mounted_guard,
 )
 from .output import format_violation_text, print_summary_text, format_json
 
@@ -328,6 +329,10 @@ class RiverpodScanner:
         violations.extend(
             check_async_star_function_providers(file_path, content, lines)
         )
+
+        # --- Every catch / .catchError in the file: a failure handler that
+        #     logs only after its mounted guard (log-first rule) ---
+        violations.extend(check_log_after_mounted_guard(file_path, content, lines))
 
         # Filter suppressed violations
         suppressed = []

@@ -3470,3 +3470,263 @@ def check_async_star_function_providers(
     return violations
 
 
+
+
+# ===========================================================================
+# CHECKER 15: check_log_after_mounted_guard (VIOLATION 16)
+# ===========================================================================
+
+# A call that records a failure: the UnifiedLogger log levels and the SSK
+# static classifier that logs on a caller's behalf.
+_RE_LOG_CALL = re.compile(
+    r'\.\s*log(?:Error|Warning|Critical|Info|Debug|Verbose|SubscriptionError|Classified)\s*\('
+)
+_RE_CATCH_HEAD = re.compile(r'\bcatch\s*\(')
+_RE_CATCH_ERROR_HEAD = re.compile(r'\.\s*catchError\s*\(')
+# `mounted` / `ref.mounted` / `context.mounted` / `state.context.mounted`, and
+# RoutePresence's `isOnActiveRoute` — every one is false once the host is gone.
+_RE_PRESENCE_TERM = r'\s*(?:[A-Za-z_]\w*\s*\.\s*)*(?:mounted|isOnActiveRoute)\s*'
+_RE_NEGATED_PRESENCE = re.compile(r'\s*!' + _RE_PRESENCE_TERM)
+_RE_PRESENCE = re.compile(_RE_PRESENCE_TERM)
+_RE_GUARD_EXITS = re.compile(r'(?:^|[;{}])\s*(?:return|throw|rethrow|continue|break)\b')
+# A `(...)` followed by `{` opens a control block only after these keywords;
+# after anything else (a parameter list, a local function's name) the `{`
+# opens a function body that runs when called, not in the catch's own flow.
+_CONTROL_KEYWORDS = frozenset({'if', 'for', 'while', 'switch', 'catch'})
+
+
+def _split_top_level(condition: str, operator: str) -> List[str]:
+    """Split ``condition`` on ``operator`` (``||`` / ``&&``) at bracket depth 0."""
+    parts: List[str] = []
+    depth = 0
+    start = 0
+    i = 0
+    while i < len(condition):
+        ch = condition[i]
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+        elif depth == 0 and condition.startswith(operator, i):
+            parts.append(condition[start:i])
+            start = i + len(operator)
+            i += len(operator)
+            continue
+        i += 1
+    parts.append(condition[start:])
+    return parts
+
+
+def _function_body_spans(code: str, start: int, end: int) -> List[Tuple[int, int]]:
+    """Spans of every function-literal / local-function body in ``code[start:end]``.
+
+    A ``{`` opens a function body when it follows a parameter list (optionally
+    then ``async`` / ``async*`` / ``sync*``) whose ``(`` is not a control
+    keyword's. Such a body runs when called, not in the enclosing flow.
+    """
+    spans: List[Tuple[int, int]] = []
+    i = start
+    while i < end:
+        if code[i] != '{':
+            i += 1
+            continue
+        j = i - 1
+        while j >= start and code[j].isspace():
+            j -= 1
+        marker = re.search(r'(?:async\*?|sync\*)\s*$', code[start:j + 1])
+        if marker:
+            j = start + marker.start() - 1
+            while j >= start and code[j].isspace():
+                j -= 1
+        if j >= start and code[j] == ')':
+            depth = 0
+            k = j
+            while k >= start:
+                if code[k] == ')':
+                    depth += 1
+                elif code[k] == '(':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k -= 1
+            word = re.search(r'([A-Za-z_]\w*)\s*$', code[start:max(k, start)])
+            if k >= start and not (word and word.group(1) in _CONTROL_KEYWORDS):
+                close = find_matching_brace(code, i + 1)
+                spans.append((i, close + 1))
+                i = close + 1
+                continue
+        i += 1
+    return spans
+
+
+def _log_lost_on_back_out(code: str, start: int, end: int) -> Optional[int]:
+    """Position of the first log call in ``code[start:end]`` when EVERY log call
+    there runs only while the host is still mounted; ``None`` otherwise.
+
+    A log call runs only while mounted when an exiting presence guard
+    (``if (!mounted) return;`` — any ``!…mounted`` / ``!…isOnActiveRoute``
+    disjunct of a top-level ``||``) comes before it in a block that contains
+    it, or when it sits inside a positive presence check (``if (mounted) {…}``
+    — any such conjunct of a top-level ``&&``). Function bodies nested in the
+    handler (a callback, a local function) are outside its flow: neither their
+    guards nor their log calls are judged here.
+    """
+    nested = _function_body_spans(code, start, end)
+
+    def in_nested(pos: int) -> bool:
+        return any(s <= pos < e for s, e in nested)
+
+    dominated: List[Tuple[int, int]] = []  # after an exiting negative guard, to its block's end
+    positive: List[Tuple[int, int]] = []   # the statement / block a positive check guards
+    for head in re.finditer(r'\bif\s*\(', code[start:end]):
+        # A guard inside a nested function dominates only to the end of that
+        # function's own block, so it can never cover a log in the handler.
+        if_pos = start + head.start()
+        cond_open = start + head.end()
+        cond_close = find_matching_paren(code, cond_open)
+        if cond_close >= end:
+            continue
+        condition = code[cond_open:cond_close]
+        body = cond_close + 1
+        while body < end and code[body].isspace():
+            body += 1
+        if body >= end:
+            continue
+        if code[body] == '{':
+            body_end = find_matching_brace(code, body + 1) + 1
+        else:
+            body_end = find_statement_end(code, body) + 1
+        body_text = code[body:body_end]
+        if any(_RE_NEGATED_PRESENCE.fullmatch(part) for part in _split_top_level(condition, '||')):
+            if not _RE_GUARD_EXITS.search(body_text.lstrip('{')):
+                continue
+            block_end = end
+            depth = 0
+            for k in range(if_pos - 1, start - 1, -1):
+                if code[k] == '}':
+                    depth += 1
+                elif code[k] == '{':
+                    if depth == 0:
+                        block_end = find_matching_brace(code, k + 1)
+                        break
+                    depth -= 1
+            dominated.append((body_end, min(block_end, end)))
+        elif any(_RE_PRESENCE.fullmatch(part) for part in _split_top_level(condition, '&&')):
+            positive.append((body, body_end))
+
+    logs = [start + m.start() for m in _RE_LOG_CALL.finditer(code[start:end])]
+    logs = [pos for pos in logs if not in_nested(pos)]
+    if not logs:
+        return None
+    for pos in logs:
+        if not any(s <= pos < e for s, e in dominated + positive):
+            return None
+    return logs[0]
+
+
+def _get_log_after_mounted_guard_fix(is_catch_error: bool) -> str:
+    """Fix instructions for a failure handler that logs only after its guard."""
+    if is_catch_error:
+        return """This .catchError callback logs only after its mounted guard, so a failure
+that lands after a back-out is never recorded. A .catchError callback must guard
+first (Gate 1), so convert it to try / await / catch and log first:
+
+   final logger = ref.read(unifiedLoggerProvider);   // capture while mounted
+   try {
+     await operation();
+   } catch (e, st) {
+     logger.logError('Failed', error: e, stackTrace: st);   // log FIRST
+     if (!mounted) return;                                   // THEN guard
+     // ... show the failure
+   }"""
+    return """This catch logs only after its mounted guard, so a failure that lands after a
+back-out is never recorded. Log FIRST through a logger captured while mounted
+(a captured value stays safe to use after unmount), THEN guard before anything
+that touches ref / context / state:
+
+   if (!mounted) return;
+   final logger = ref.read(unifiedLoggerProvider);   // capture while mounted
+   try {
+     await operation();
+     if (!mounted) return;
+   } catch (e, st) {
+     logger.logError('Failed', error: e, stackTrace: st);   // log FIRST
+     if (!mounted) return;                                   // THEN guard
+     // ... ref / context / state
+   }
+
+A logger read inside the catch (ref.read(unifiedLoggerProvider)) is a ref use and
+must itself follow the guard, so capture it before the try instead. Anything the
+log message needs from ref / context / state must be read before the try too."""
+
+
+def check_log_after_mounted_guard(
+    file_path: Path,
+    content: str,
+    lines: List[str],
+) -> List[Violation]:
+    """CHECKER 15: a failure handler that logs only once the host is known to
+    be mounted (LOG_AFTER_MOUNTED_GUARD).
+
+    The log-first rule: in every ``catch``, log the failure FIRST, through a
+    logger captured while mounted, and only then guard before touching
+    ref / context / state. A handler shaped ``if (!mounted) return;`` then
+    ``logger.logError(...)`` drops every failure that lands after a back-out.
+
+    Flags a ``catch`` block, or a block-bodied ``.catchError`` callback, that
+    contains at least one log call and in which EVERY log call runs only while
+    mounted (see :func:`_log_lost_on_back_out`). A handler with no log call is
+    not this rule's concern; one that logs anything before its guard has
+    recorded the failure.
+
+    Runs at file scope, over every class and top-level function, so a catch in
+    a widget callback, a plain ``State`` or a service is judged the same as one
+    in a notifier. Comments and string-literal text are blanked first (both
+    length-preserving), so a message that mentions ``mounted`` or ``logError``
+    is not code and every position is an original position.
+    """
+    violations: List[Violation] = []
+    code = blank_string_literals(remove_comments(content))
+
+    handlers: List[Tuple[int, int, int, bool]] = []  # (report_pos, body_open, body_close, is_catch_error)
+    for head in _RE_CATCH_HEAD.finditer(code):
+        params_close = find_matching_paren(code, head.end())
+        brace = params_close + 1
+        while brace < len(code) and code[brace].isspace():
+            brace += 1
+        if brace >= len(code) or code[brace] != '{':
+            continue
+        handlers.append((head.start(), brace + 1, find_matching_brace(code, brace + 1), False))
+    for head in _RE_CATCH_ERROR_HEAD.finditer(code):
+        callback = head.end()
+        while callback < len(code) and code[callback].isspace():
+            callback += 1
+        if callback >= len(code) or code[callback] != '(':
+            continue  # a tear-off or a named handler, not a function literal
+        params_close = find_matching_paren(code, callback + 1)
+        tail = re.match(r'\s*(?:async\s*)?\{', code[params_close + 1:])
+        if not tail:
+            continue  # an arrow body is one expression: it cannot hold a guard
+        brace = params_close + 1 + tail.end() - 1
+        handlers.append((head.start(), brace + 1, find_matching_brace(code, brace + 1), True))
+
+    for report_pos, body_open, body_close, is_catch_error in handlers:
+        first_log = _log_lost_on_back_out(code, body_open, body_close)
+        if first_log is None:
+            continue
+        handler_line = content[:report_pos].count('\n') + 1
+        log_line = content[:first_log].count('\n') + 1
+        kind = '.catchError callback' if is_catch_error else 'catch block'
+        violations.append(Violation(
+            file_path=str(file_path),
+            class_name='',
+            violation_type=ViolationType.LOG_AFTER_MOUNTED_GUARD,
+            line_number=handler_line,
+            context=(
+                f"{kind} logs only after its mounted guard (first log at line {log_line}): "
+                f"a failure that lands after a back-out is never recorded"
+            ),
+            code_snippet=extract_snippet(lines, handler_line, before=0, after=max(4, log_line - handler_line + 1)),
+            fix_instructions=_get_log_after_mounted_guard_fix(is_catch_error),
+        ))
+    return violations

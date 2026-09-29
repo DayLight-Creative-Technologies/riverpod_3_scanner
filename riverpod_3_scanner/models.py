@@ -39,6 +39,7 @@ class ViolationType(Enum):
     STATE_ASSIGN_AWAIT = "state_assign_await"
     ASYNC_STAR_REF_BEFORE_MOUNTED = "async_star_ref_before_mounted"
     BUILD_LISTEN_SYNC_STATE_MUTATION = "build_listen_sync_state_mutation"
+    LOG_AFTER_MOUNTED_GUARD = "log_after_mounted_guard"
 
 
 VIOLATION_SEVERITY = {
@@ -63,6 +64,8 @@ VIOLATION_SEVERITY = {
     ViolationType.STATE_ASSIGN_AWAIT: Severity.CRITICAL,
     ViolationType.ASYNC_STAR_REF_BEFORE_MOUNTED: Severity.CRITICAL,
     ViolationType.BUILD_LISTEN_SYNC_STATE_MUTATION: Severity.CRITICAL,
+    # Loses a failure record rather than crashing.
+    ViolationType.LOG_AFTER_MOUNTED_GUARD: Severity.WARNING,
 }
 
 

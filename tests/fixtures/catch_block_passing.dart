@@ -36,17 +36,19 @@ class CatchBlockPassing extends _$CatchBlockPassing {
     }
   }
 
-  // PASSING: ref.read in catch block WITH mounted guard
+  // PASSING: ref.read in catch block WITH mounted guard, after the failure is
+  // logged through the logger captured at entry (log first, then guard)
   Future<void> fetchDataGood3() async {
     if (!ref.mounted) return;
+    final logger = ref.read(loggerProvider);
     try {
       final result = await someApi();
       if (!ref.mounted) return;
       state = AsyncData(result);
     } catch (e, stack) {
-      if (!ref.mounted) return;
-      final logger = ref.read(loggerProvider);
       logger.logError('Failed', error: e, stackTrace: stack);
+      if (!ref.mounted) return;
+      ref.read(retryProvider.notifier).schedule();
     }
   }
 }
