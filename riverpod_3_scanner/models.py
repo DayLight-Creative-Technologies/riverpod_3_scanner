@@ -24,6 +24,7 @@ class ViolationType(Enum):
     REF_READ_BEFORE_MOUNTED = "ref_read_before_mounted"
     MISSING_MOUNTED_AFTER_AWAIT = "missing_mounted_after_await"
     MISSING_MOUNTED_IN_CATCH = "missing_mounted_in_catch"
+    MISSING_MOUNTED_IN_FINALLY = "missing_mounted_in_finally"
     NULLABLE_FIELD_ACCESS = "nullable_field_access"
     REF_IN_LIFECYCLE_CALLBACK = "ref_in_lifecycle_callback"
     REF_LISTEN_OUTSIDE_BUILD = "ref_listen_outside_build"
@@ -49,6 +50,7 @@ VIOLATION_SEVERITY = {
     ViolationType.REF_READ_BEFORE_MOUNTED: Severity.CRITICAL,
     ViolationType.MISSING_MOUNTED_AFTER_AWAIT: Severity.CRITICAL,
     ViolationType.MISSING_MOUNTED_IN_CATCH: Severity.CRITICAL,
+    ViolationType.MISSING_MOUNTED_IN_FINALLY: Severity.CRITICAL,
     ViolationType.NULLABLE_FIELD_ACCESS: Severity.CRITICAL,
     ViolationType.REF_IN_LIFECYCLE_CALLBACK: Severity.CRITICAL,
     ViolationType.REF_LISTEN_OUTSIDE_BUILD: Severity.CRITICAL,

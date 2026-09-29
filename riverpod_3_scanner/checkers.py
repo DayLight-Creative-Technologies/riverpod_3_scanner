@@ -221,6 +221,29 @@ the guard - including ref.read(myLoggerProvider), so capture the logger before
 the try, not inside the catch."""
 
 
+def _get_missing_mounted_in_finally_fix(is_consumer_state: bool = False) -> str:
+    """Get fix instructions for a ref/state use in a finally block before its guard."""
+    if is_consumer_state:
+        use = "setState(() => _isLoading = false);"
+        guarded = "if (mounted) setState(() => _isLoading = false);"
+    else:
+        use = "state = state.copyWith(isLoading: false);"
+        guarded = "if (ref.mounted) state = state.copyWith(isLoading: false);"
+    return f"""A finally block runs after EVERY exit from the try — including each early
+`if (!ref.mounted) return;` / `if (!mounted) return;` — so it is reached with the
+host already gone. Guard before anything in it that touches ref / state:
+
+   }} finally {{
+     _isProcessing = false;          // a plain field: safe
+     {guarded}
+   }}
+
+   // not:  }} finally {{ {use} }}
+
+A value captured while mounted (a logger read before the try) is safe to use
+in finally without a guard; ref.read(...) / ref.watch(...) / state access is not."""
+
+
 def _get_state_assign_await_fix() -> str:
     """Get fix instructions for state = await pattern."""
     return """Separate the await from the state assignment with a mounted check:
@@ -882,45 +905,56 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         # Only ref/state uses are dangerous; a call on a captured value
         # (`logger.logError(...)`) is not, so it may precede the guard. A
         # positive check (`if (mounted) { ... }`) guards only its own block.
-        catch_pattern = re.compile(r'catch\s*\([^)]+\)\s*\{')
-        for catch_match in catch_pattern.finditer(method_body):
-            catch_start = catch_match.end()
-            catch_end = find_matching_brace(method_body, catch_start)
-            catch_body = method_body[catch_start:catch_end]
+        # VIOLATION 6b judges a `finally` block the same way: it runs after
+        # every early return in the try — including each `if (!ref.mounted)
+        # return;` — so it is reached with the host already gone.
+        handler_kinds = (
+            (re.compile(r'catch\s*\([^)]+\)\s*\{'), ViolationType.MISSING_MOUNTED_IN_CATCH, 'catch block'),
+            (re.compile(r'\bfinally\s*\{'), ViolationType.MISSING_MOUNTED_IN_FINALLY, 'finally block'),
+        )
+        for catch_pattern, handler_type, handler_kind in handler_kinds:
+            for catch_match in catch_pattern.finditer(method_body):
+                catch_start = catch_match.end()
+                catch_end = find_matching_brace(method_body, catch_start)
+                catch_body = method_body[catch_start:catch_end]
 
-            # Comments and string-literal text cannot hold a guard or a use —
-            # a log message like 'Could not restore state.' is not a state access.
-            # What a positive mounted check guards is safe by construction.
-            catch_code = _blank_mounted_guarded_regions(
-                blank_string_literals(remove_comments(catch_body)),
-                positive_mounted_condition,
-            )
-            danger = _leftmost_unguarded_danger(
-                catch_code, _CATCH_DANGER_PATTERNS, mounted_re
-            )
-            if danger is None:
-                continue
+                # Comments and string-literal text cannot hold a guard or a use —
+                # a log message like 'Could not restore state.' is not a state access.
+                # What a positive mounted check guards is safe by construction.
+                catch_code = _blank_mounted_guarded_regions(
+                    blank_string_literals(remove_comments(catch_body)),
+                    positive_mounted_condition,
+                )
+                danger = _leftmost_unguarded_danger(
+                    catch_code, _CATCH_DANGER_PATTERNS, mounted_re
+                )
+                if danger is None:
+                    continue
 
-            abs_line = full_content[:class_start + method_start + catch_match.start()].count('\n') + 1
-            danger_line = full_content[
-                :class_start + method_start + catch_start + danger.start()
-            ].count('\n') + 1
-            snippet_start = max(0, abs_line - 1)
-            snippet_end = min(len(lines), max(abs_line + 8, danger_line + 2))
-            snippet = '\n'.join(f"  {i + 1:4d} | {lines[i]}" for i in range(snippet_start, snippet_end))
+                abs_line = full_content[:class_start + method_start + catch_match.start()].count('\n') + 1
+                danger_line = full_content[
+                    :class_start + method_start + catch_start + danger.start()
+                ].count('\n') + 1
+                snippet_start = max(0, abs_line - 1)
+                snippet_end = min(len(lines), max(abs_line + 8, danger_line + 2))
+                snippet = '\n'.join(f"  {i + 1:4d} | {lines[i]}" for i in range(snippet_start, snippet_end))
 
-            violations.append(Violation(
-                file_path=str(ctx.file_path),
-                class_name=ctx.class_name,
-                violation_type=ViolationType.MISSING_MOUNTED_IN_CATCH,
-                line_number=abs_line,
-                context=(
-                    f"Method {method_name}(): Missing ref.mounted in catch block "
-                    f"({danger.group(0).strip()} at line {danger_line} runs before any mounted guard)"
-                ),
-                code_snippet=snippet,
-                fix_instructions=_get_missing_mounted_in_catch_fix(ctx.is_consumer_state),
-            ))
+                violations.append(Violation(
+                    file_path=str(ctx.file_path),
+                    class_name=ctx.class_name,
+                    violation_type=handler_type,
+                    line_number=abs_line,
+                    context=(
+                        f"Method {method_name}(): Missing ref.mounted in {handler_kind} "
+                        f"({danger.group(0).strip()} at line {danger_line} runs before any mounted guard)"
+                    ),
+                    code_snippet=snippet,
+                    fix_instructions=(
+                        _get_missing_mounted_in_finally_fix(ctx.is_consumer_state)
+                        if handler_type is ViolationType.MISSING_MOUNTED_IN_FINALLY
+                        else _get_missing_mounted_in_catch_fix(ctx.is_consumer_state)
+                    ),
+                ))
 
     return violations
 
