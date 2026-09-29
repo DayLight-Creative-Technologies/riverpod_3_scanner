@@ -32,23 +32,77 @@ RE_HOOK_CONSUMER_WIDGET_CLASS = re.compile(
     r'class\s+(\w+)\s+extends\s+HookConsumerWidget\b'
 )
 
+# --- Method-signature building blocks: the ONE owner of how a declaration's
+# --- generic return type and parameter list are matched.
+#
+# Every checker finds methods by matching a signature (`Future<T> name(params)
+# async {`). The generic type and the parameter list used to be spelled as the
+# lazy, DOTALL `Future<.+?>` and `\(.*?\)` (or `[^)]*`). A lazy `.+?>` starts
+# wherever `Future<` appears — an expression like `await Future<void>.delayed(
+# Duration.zero)`, a field initializer, an arrow-bodied `Future<int> reload() =>
+# _fetch();` — and runs on to the next `>` (or `) async`) that lets the rest of
+# the pattern fit, SWALLOWING every method declared in between. Swallowed sync
+# methods never reached the method database (VIOLATION 10 went silent on them),
+# and `find_async_methods` returned the wrong names, so the async method after
+# an arrow-bodied `Future` method was never checked at all.
+#
+# `_balanced` matches `open ... close` with the nesting the source actually has,
+# so a group ends at ITS closing delimiter and never later. A generic type
+# cannot contain `;`, which additionally keeps a scan from leaving its statement.
+# Nesting is bounded (regexes are not recursive): 8 levels of `<>`
+# (`Future<Map<String, List<Map<String, int>>>>` is 4) and 6 of `()`.
+def _balanced(open_ch: str, close_ch: str, depth: int, excluded: str = '') -> str:
+    """Regex source for ``open ... close`` with balanced nesting up to ``depth``."""
+    o, c = re.escape(open_ch), re.escape(close_ch)
+    inner = f'[^{o}{c}{excluded}]'
+    pattern = f'{o}{inner}*{c}'
+    for _ in range(depth - 1):
+        pattern = f'{o}(?:{inner}|{pattern})*{c}'
+    return pattern
+
+
+_GENERIC_ARGS = _balanced('<', '>', 8, excluded=';')
+FUTURE_TYPE_PATTERN = f'Future{_GENERIC_ARGS}'
+FUTUREOR_TYPE_PATTERN = f'FutureOr{_GENERIC_ARGS}'
+STREAM_TYPE_PATTERN = f'Stream{_GENERIC_ARGS}'
+PARAM_LIST_PATTERN = _balanced('(', ')', 6)
+ASYNC_RETURN_TYPE_PATTERN = (
+    f'(?:{FUTURE_TYPE_PATTERN}|{FUTUREOR_TYPE_PATTERN}|{STREAM_TYPE_PATTERN})'
+)
+
+
+def async_signature_head(name: str = r'(\w+)') -> str:
+    """Regex source for ``<async return type> name(params)``.
+
+    The part of an async method signature every checker matches identically;
+    callers append what follows the parameter list (``async``, ``async*``,
+    ``{``). ``name`` is a capture group by default, or a literal method name.
+    """
+    return rf'{ASYNC_RETURN_TYPE_PATTERN}\s+{name}\s*{PARAM_LIST_PATTERN}'
+
+
 # Async method signatures
 RE_ASYNC_FUTURE = re.compile(
-    r'Future<.+?>\s+(\w+)\s*\(.*?\)\s+async(?:\s|{)', re.DOTALL
+    rf'{FUTURE_TYPE_PATTERN}\s+(\w+)\s*{PARAM_LIST_PATTERN}\s+async(?:\s|{{)'
 )
 RE_ASYNC_FUTUREOR = re.compile(
-    r'FutureOr<.+?>\s+(\w+)\s*\(.*?\)\s+async(?:\s|{)', re.DOTALL
+    rf'{FUTUREOR_TYPE_PATTERN}\s+(\w+)\s*{PARAM_LIST_PATTERN}\s+async(?:\s|{{)'
 )
 RE_ASYNC_STREAM = re.compile(
-    r'Stream<.+?>\s+(\w+)\s*\(.*?\)\s+async\*(?:\s|{)', re.DOTALL
+    rf'{STREAM_TYPE_PATTERN}\s+(\w+)\s*{PARAM_LIST_PATTERN}\s+async\*(?:\s|{{)'
 )
 
 # General method pattern (both sync and async)
-# Use .+? (non-greedy) for nested generic support (e.g. Future<Either<A, B>>)
 RE_METHOD = re.compile(
-    r'(?:Future<.+?>|Stream<.+?>|void|bool|String|int|double|num|\w+\?)'
-    r'\s+(\w+)\s*\([^)]*\)\s*(?:async\s*)?\{',
-    re.DOTALL,
+    rf'(?:{FUTURE_TYPE_PATTERN}|{STREAM_TYPE_PATTERN}|void|bool|String|int|double|num|\w+\?)'
+    rf'\s+(\w+)\s*{PARAM_LIST_PATTERN}\s*(?:async\s*)?\{{'
+)
+
+# The methods `find_methods_using_ref` inspects — includes FutureOr, for
+# Riverpod build methods.
+_RE_METHOD_WITH_REF_CANDIDATE = re.compile(
+    rf'(?:{FUTURE_TYPE_PATTERN}|{FUTUREOR_TYPE_PATTERN}|void|[A-Z]\w+)'
+    rf'\s+(\w+)\s*{PARAM_LIST_PATTERN}\s*(?:async\s*)?\{{'
 )
 
 # Ref operation patterns
@@ -140,9 +194,8 @@ RE_ANY_CLASS_DECL = re.compile(
 # `@override`, not `@riverpod`, and take no `Ref` parameter.
 RE_STREAM_FN_PROVIDER_HEAD = re.compile(
     r'@(?:riverpod|Riverpod\s*\([^)]*\))\s+'
-    r'Stream<.+?>\s+'
+    rf'{STREAM_TYPE_PATTERN}\s+'
     r'(\w+)\s*\(',
-    re.DOTALL,
 )
 
 # Suppression comment patterns
@@ -864,13 +917,7 @@ def find_methods_using_ref(class_content: str) -> Set[str]:
     methods_with_ref: Set[str] = set()
 
     # Match methods including FutureOr for Riverpod build methods
-    # Use .+? (non-greedy) for nested generic support (e.g. Future<Either<A, B>>)
-    method_pattern = re.compile(
-        r'(?:Future<.+?>|FutureOr<.+?>|void|[A-Z]\w+)'
-        r'\s+(\w+)\s*\([^)]*\)\s*(?:async\s*)?\{'
-    )
-
-    for method_match in method_pattern.finditer(class_content):
+    for method_match in _RE_METHOD_WITH_REF_CANDIDATE.finditer(class_content):
         method_name = method_match.group(1)
         # Position of the opening '{' is at method_match.end() - 1
         brace_pos = method_match.end()  # Right after '{'

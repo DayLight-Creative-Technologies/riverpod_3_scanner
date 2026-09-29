@@ -26,6 +26,9 @@ from .utils import (
     find_methods_using_ref,
     has_significant_code_after_await,
     first_state_access,
+    async_signature_head,
+    FUTURE_TYPE_PATTERN,
+    PARAM_LIST_PATTERN,
     infer_type_from_provider,
     resolve_variable_to_class,
     extract_snippet,
@@ -720,12 +723,12 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
     )
 
     for method_name in ctx.async_methods:
-        # Use .+? (non-greedy any char) instead of [^>]+ to handle nested
-        # generics like Future<Either<Failure, void>>. The [^>]+ pattern fails
-        # on nested types because it stops at the first > inside the generic.
+        # The signature head (balanced generics + parameter list) is owned by
+        # utils.async_signature_head — nested generics like
+        # Future<Either<Failure, void>> match, and a `Future<` in an earlier
+        # expression cannot swallow this method's declaration.
         method_pattern = re.compile(
-            rf'(?:Future<.+?>|FutureOr<.+?>|Stream<.+?>)\s+{method_name}\s*\([^)]*\)\s+async\*?\s*\{{',
-            re.DOTALL,
+            async_signature_head(method_name) + r'\s+async\*?\s*\{'
         )
         method_match = method_pattern.search(class_content)
 
@@ -2709,10 +2712,9 @@ def check_mounted_confusion(ctx: CheckContext) -> List[Violation]:
     violations: List[Violation] = []
 
     for method_name in ctx.async_methods:
-        # Use .+? (non-greedy) for nested generic support (e.g. Future<Either<A, B>>)
+        # Signature head owned by utils.async_signature_head (balanced generics).
         method_pattern = re.compile(
-            rf'(?:Future<.+?>|FutureOr<.+?>|Stream<.+?>)\s+{method_name}\s*\([^)]*\)\s+async\*?\s*\{{',
-            re.DOTALL,
+            async_signature_head(method_name) + r'\s+async\*?\s*\{'
         )
         method_match = method_pattern.search(ctx.class_content)
 
@@ -2968,8 +2970,8 @@ See also: Flutter widget lifecycle documentation""",
         # Check methods called from initState to see if they use the getter
         for method_name in called_methods:
             method_pattern = re.compile(
-                rf'(?:Future<.+?>|void)\s+{method_name}\s*\([^)]*\)\s+(?:async\s+)?\{{',
-                re.DOTALL,
+                rf'(?:{FUTURE_TYPE_PATTERN}|void)\s+{method_name}\s*{PARAM_LIST_PATTERN}'
+                rf'\s+(?:async\s+)?\{{'
             )
             method_match = method_pattern.search(ctx.class_content)
 

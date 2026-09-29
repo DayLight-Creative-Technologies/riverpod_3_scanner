@@ -11,7 +11,7 @@ License: MIT
 # dynamically (tool.setuptools.dynamic) and setup.py is a metadata-free shim.
 # It must be defined BEFORE the submodule imports below so that scanner.py
 # can `from . import __version__` without a circular-import failure.
-__version__ = "1.14.2"
+__version__ = "1.14.3"
 __author__ = "Steven Day"
 __email__ = "support@daylightcreative.tech"
 __license__ = "MIT"

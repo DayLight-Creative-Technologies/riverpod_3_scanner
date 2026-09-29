@@ -25,6 +25,7 @@ from .utils import (
     RE_MOUNTED_PROVIDER, RE_MOUNTED_WIDGET, RE_MOUNTED_ANY,
     RE_METHOD_CALL, RE_CALLBACK_START, RE_AWAIT, RE_RIVERPOD_ANNOTATION,
     SKIP_METHODS, FRAMEWORK_LIFECYCLE_METHODS, ASYNC_CALLBACK_PARAMS,
+    async_signature_head,
 )
 
 
@@ -454,6 +455,9 @@ def _pass2_trace_async_callbacks(file_path: Path, ctx: AnalysisContext) -> None:
 
 # -- Sub-trace 1: Async method calls (after await) -------------------------
 
+# `<Future|FutureOr|Stream><T> name(params) async {` — group 1 is the name.
+_RE_ASYNC_METHOD = re.compile(async_signature_head() + r'\s*async\s*\{')
+
 def _trace_async_method_calls(
     file_path: Path,
     class_name: str,
@@ -462,14 +466,11 @@ def _trace_async_method_calls(
     ctx: AnalysisContext,
 ) -> None:
     """Find all method calls inside async methods (after await statements)."""
-    # Find all async methods (including FutureOr for Riverpod build methods)
-    # Use .+? (non-greedy) for nested generic support (e.g. Future<Either<A, B>>)
-    async_pattern = re.compile(
-        r'(?:Future<.+?>|FutureOr<.+?>|Stream<.+?>)\s+(\w+)\s*\([^)]*\)\s*async\s*\{',
-        re.DOTALL,
-    )
-
-    for async_match in async_pattern.finditer(class_content):
+    # Find all async methods (including FutureOr for Riverpod build methods).
+    # The signature head (generic return type + parameter list) is owned by
+    # utils.async_signature_head, which matches balanced generics — a `Future<`
+    # inside an awaited expression cannot swallow the methods after it.
+    for async_match in _RE_ASYNC_METHOD.finditer(class_content):
         method_name = async_match.group(1)
         method_body = _find_method_body(class_content, async_match.end())
 
