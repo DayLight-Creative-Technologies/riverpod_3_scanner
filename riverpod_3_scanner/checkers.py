@@ -25,12 +25,14 @@ from .utils import (
     find_async_methods,
     find_methods_using_ref,
     has_significant_code_after_await,
+    first_state_access,
     infer_type_from_provider,
     resolve_variable_to_class,
     extract_snippet,
     get_abs_line,
     RE_REF_OPERATION,
     RE_REF_ALL_OPERATIONS,
+    RE_STATE_INTERPOLATION,
     RE_MOUNTED_CHECK_BROAD,
     RE_MOUNTED_CHECK_WIDGET,
     RE_MOUNTED_CHECK_PROVIDER,
@@ -637,16 +639,15 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
 #
 # `state` read through a string interpolation is a state access too: the getter
 # runs when the string is built and throws on a disposed notifier. The third
-# pattern is that shape — `$state` and a bare `${state}` / `${this.state}`.
-# (`${state.x}` is already covered by the second pattern.) It runs on text that
-# `blank_string_literals` has already reduced: literal text and raw strings are
-# blanked, so a `$state` still present is a real interpolation, and the
-# identifier ends where Dart's simple interpolation ends — `$stateful` reads
-# `stateful`, not `state`.
+# pattern is that shape — `$state` and a bare `${state}` / `${this.state}` —
+# and is `RE_STATE_INTERPOLATION`, the one shared definition (the entry-guard,
+# after-await and sync-method checks reach it through `first_state_access`).
+# `${state.x}` is already covered by the second pattern. Like the others it
+# runs on text that `blank_string_literals` has already reduced.
 _CATCH_DANGER_PATTERNS = (
     re.compile(r'ref\.(read|watch|listen|invalidate)'),
     re.compile(r'(?<![\w$.])state\s*[.=]|\bthis\.state\s*[.=]'),
-    re.compile(r'\$(?:state(?![A-Za-z0-9_])|\{\s*(?:this\.)?state\s*\})'),
+    RE_STATE_INTERPOLATION,
 )
 
 # The condition of a POSITIVE mounted check — `if (mounted)` on a State,
@@ -767,7 +768,7 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         # Skip build() — its return value IS the state; state= is not used early.
         state_access_match = None
         if method_name != 'build' and not ctx.is_consumer_state:
-            state_access_match = re.search(r'\bstate\s*[.=]', first_10_lines_no_comments)
+            state_access_match = first_state_access(first_10_lines)
 
         # Find the earliest ref-equivalent operation position
         first_operation_pos = None
@@ -932,7 +933,8 @@ def _find_sync_methods_with_ref_operations(
 
     Detects two ref-equivalent operation types:
     - ref.read() — explicit ref operation
-    - state access (state = or state.) — implicit ref operation on notifiers
+    - state access (state = or state., or a string interpolation that reads it:
+      '$state' / '${state}') — implicit ref operation on notifiers
       (accessing `state` on a disposed notifier throws UnmountedRefException)
 
     Returns: List of (method_name, line_offset, method_body).
@@ -967,21 +969,19 @@ def _find_sync_methods_with_ref_operations(
         # Find ref.read() operations
         ref_read_matches = list(re.finditer(r'ref\.read\(', method_body))
 
-        # Find state access operations (state = or state.)
+        # Find the first state access (state = / state. / '$state' / '${state}').
         # Only for notifier classes (not ConsumerState widgets)
-        state_access_matches = []
+        first_state_match = None
         if not is_consumer_state:
-            state_access_matches = list(re.finditer(r'\bstate\s*[.=]', method_body))
+            first_state_match = first_state_access(method_body)
 
-        if not ref_read_matches and not state_access_matches:
+        if not ref_read_matches and first_state_match is None:
             continue
 
         # Find earliest ref-equivalent operation
-        all_positions = []
-        for m in ref_read_matches:
-            all_positions.append(m.start())
-        for m in state_access_matches:
-            all_positions.append(m.start())
+        all_positions = [m.start() for m in ref_read_matches]
+        if first_state_match is not None:
+            all_positions.append(first_state_match.start())
 
         first_operation_pos = min(all_positions)
 

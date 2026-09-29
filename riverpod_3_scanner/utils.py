@@ -72,6 +72,26 @@ RE_MOUNTED_CHECK_BROAD = re.compile(
     r'if\s*\(\s*!?\s*(ref\.)?\s*mounted\s*\)'
 )
 
+# `state` access on a notifier. Reading or writing `state` on a disposed
+# notifier throws (riverpod 3.4.3 notifier_provider.dart `get state` /
+# `set state` -> `_throwIfInvalidUsage()`), so it is a ref-equivalent operation.
+#
+# RE_STATE_ACCESS is the direct form: `state = x`, `state.x`, `state == y`.
+#
+# RE_STATE_INTERPOLATION is the ONE definition of the interpolated form: a
+# string that reads the getter when it is built — `'$state'`, `'${state}'`,
+# `'${this.state}'`. (`'${state.x}'` is a direct access inside the braces.) It
+# only means anything on text that `blank_string_literals` has already reduced:
+# literal text, raw strings and escaped `\$` are blanked there, so a `$state`
+# that is still present IS an interpolation. Its identifier ends where Dart's
+# simple interpolation ends, so `$stateful` reads `stateful`, not `state`.
+# Callers reach both through `first_state_access` (or, for the catch-block
+# check, `_CATCH_DANGER_PATTERNS`, which reuses this constant).
+RE_STATE_ACCESS = re.compile(r'\bstate\s*[.=]')
+RE_STATE_INTERPOLATION = re.compile(
+    r'\$(?:state(?![A-Za-z0-9_])|\{\s*(?:this\.)?state\s*\})'
+)
+
 # Method call detection
 RE_METHOD_CALL = re.compile(
     r'(?:^|[^\w])(\w+)\.(\w+)\(|(?:^|[^\w])(\w+)\('
@@ -770,6 +790,39 @@ def remove_comments(code: str) -> str:
 
 
 # =============================================================================
+# 5b. State-access detection (the shared "does this code touch state?" question)
+# =============================================================================
+
+def first_state_access(code: str) -> Optional['re.Match[str]']:
+    """Return the leftmost access to a notifier's ``state`` in ``code``, else ``None``.
+
+    Both forms count — the direct one (``state = x``, ``state.x``; see
+    :data:`RE_STATE_ACCESS`) and a string interpolation that reads the getter
+    (``'$state'``, ``'${state}'``; see :data:`RE_STATE_INTERPOLATION`). Comments
+    and string-literal text are blanked first, so a message that merely
+    *mentions* state (``'Could not restore state.'``), a raw string
+    (``r'$state'``) and an escaped dollar (``'\\$state'``) are not accesses, while
+    a real interpolation is.
+
+    The blanking is length-preserving, so ``match.start()`` is a position in
+    ``code`` itself and ``match`` can be compared against positions the caller
+    found in the same text (``match.group(0)`` is text of the blanked copy).
+
+    The one entry point for the entry-guard check, the after-await check and the
+    sync-method check, so the three cannot drift apart on what counts as state
+    use.
+    """
+    reduced = blank_string_literals(remove_comments(code))
+    direct = RE_STATE_ACCESS.search(reduced)
+    interpolated = RE_STATE_INTERPOLATION.search(reduced)
+    if direct is None:
+        return interpolated
+    if interpolated is None:
+        return direct
+    return direct if direct.start() <= interpolated.start() else interpolated
+
+
+# =============================================================================
 # 6. Method discovery helpers
 # =============================================================================
 
@@ -838,7 +891,9 @@ def has_significant_code_after_await(next_lines: str) -> bool:
 
     Returns True ONLY if there are:
     - ref operations (ref.read/watch/listen/invalidate)
-    - state assignments or access (state = or state.)
+    - state assignments or access (state = or state.), including a string
+      interpolation that reads it ('$state', '${state}') — see
+      :func:`first_state_access`
 
     Returns False for closing braces, whitespace, comments, void returns,
     return-with-value, and method calls on the await result.
@@ -865,7 +920,7 @@ def has_significant_code_after_await(next_lines: str) -> bool:
         return True
 
     # Check for state assignment or access
-    if re.search(r'\bstate\s*[.=]', next_lines):
+    if first_state_access(next_lines) is not None:
         return True
 
     return False

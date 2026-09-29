@@ -5,6 +5,20 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.2] - 2026-09-29
+
+### Fixed
+
+- **A string interpolation that reads `state` is now a state access in every check, not only the catch-block check** (SocialScoreKeeper Ship's Log gap #815, the follow-up to 1.14.1). `'$state'` and `'${state}'` call the notifier's `state` getter when the string is built, and the getter throws on a disposed notifier (riverpod 3.4.3 `lib/src/core/provider/notifier_provider.dart:81-85`, `_throwIfInvalidUsage()`). 1.14.1 taught VIOLATION 6 (`missing_mounted_in_catch`) that. The three other places that decide "does this code touch `state`" matched `\bstate\s*[.=]` on raw text, so a bare interpolation with no `.` or `=` after it went unreported:
+  - **VIOLATION 4 `ref_read_before_mounted`** — the entry-guard check over the first lines of an async method.
+  - **VIOLATION 5 `missing_mounted_after_await`** — code after an `await` (`has_significant_code_after_await`).
+  - **VIOLATION 10 `sync_method_without_mounted_check`** — a sync method called from an async context.
+  - **One shared matcher.** All three now call `utils.first_state_access`, which finds the leftmost state access in either form: the direct `RE_STATE_ACCESS` (`state = x`, `state.x`) or `RE_STATE_INTERPOLATION` (`$state`, `${state}`, `${this.state}`). `RE_STATE_INTERPOLATION` is the same constant the catch-block check uses in `_CATCH_DANGER_PATTERNS` — the pattern is defined once, in `utils.py`.
+  - **Comments and string-literal text are blanked first** (the 1.14.1 `blank_string_literals` pass), which is what keeps `r'$state'` (raw — no interpolation), `'\$state'` (escaped), `'$stateful'` (reads `stateful`) and `'$this.state'` (reads `this`) from being flagged.
+- **Behavior note for adopters — fewer false positives, one new true positive class.** Because the three checks now read comment- and string-blanked text, they no longer count prose or a commented-out line as state use: `logger.logInfo('Could not restore state.')` and `// state = old` after an `await` (or in the first lines of a method) used to satisfy the "significant code" / "state access" test and no longer do. A bare `'$state'` / `'${state}'` with no guard before it is now reported. A codebase that was green on 1.14.1 may report `ref_read_before_mounted`, `missing_mounted_after_await` or `sync_method_without_mounted_check` for a message that interpolates `state` before the guard; move the message after the guard, or log a value captured while mounted (`final current = state;` before the `try`).
+- **Not changed:** the `ref.` matchers in those checks still run on raw text, and the direct-access pattern keeps its per-check shape (the catch-block check refuses a member `x.state`; the other three still match it). Only the interpolated form was the gap.
+- **Tests: 257** (was 160). New `tests/test_state_interpolation_checks.py`: the shared matcher (both forms, leftmost wins, positions index the original text, the constant is the one the catch check uses) and each of the three checks in both directions — flagged: bare and braced, `${this.state}`, double- and triple-quoted, adjacent strings, nested `${'$state'}`, an await inside the first lines; clean: raw, escaped, longer identifiers, `'$this.state'`, prose, a comment, guard-then-`'$state'`. The sync-method check is covered both directly and end to end through `scan_directory` (a sync method called after an `await`).
+
 ## [1.14.1] - 2026-09-29
 
 ### Fixed
