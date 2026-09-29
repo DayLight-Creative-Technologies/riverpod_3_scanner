@@ -5,6 +5,7 @@ from pathlib import Path
 from riverpod_3_scanner.utils import (
     FileCache,
     blank_comments,
+    blank_string_literals,
     find_matching_brace,
     find_matching_paren,
     is_file_suppressed,
@@ -146,3 +147,59 @@ class TestFileCache:
         assert cache.read_text(f) == "class A {}"
         f.unlink()  # second read must come from cache
         assert cache.read_text(f) == "class A {}"
+
+
+class TestBlankStringLiterals:
+    def test_preserves_length_and_newlines(self):
+        src = "log('a\\nb ${x}');\nfinal t = '''one\ntwo''';\nfinal r = r'raw $y';\n"
+        out = blank_string_literals(src)
+        assert len(out) == len(src)
+        assert out.count("\n") == src.count("\n")
+
+    def test_blanks_literal_text_but_keeps_delimiters(self):
+        out = blank_string_literals("logger.logError('Could not restore state.');")
+        assert "state" not in out
+        assert out == "logger.logError('                        ');"
+
+    def test_message_mentioning_ref_read_is_blanked(self):
+        assert "ref.read" not in blank_string_literals("log('ref.read(x) skipped');")
+
+    def test_interpolation_expression_is_code_and_kept(self):
+        out = blank_string_literals("log('for ${ref.read(idProvider)} done');")
+        assert "ref.read(idProvider)" in out
+        assert "for" not in out and "done" not in out
+
+    def test_dollar_identifier_shorthand_is_literal_text(self):
+        assert "state" not in blank_string_literals("log('at $state.name');")
+
+    def test_escaped_dollar_does_not_open_an_interpolation(self):
+        assert "ref.read" not in blank_string_literals("log('cost \\${ref.read(x)}');")
+
+    def test_nested_string_inside_interpolation_is_blanked_recursively(self):
+        out = blank_string_literals("log('a ${f('ref.read(y)')} b');")
+        assert "f(" in out
+        assert "ref.read" not in out
+
+    def test_double_quoted_triple_quoted_and_raw_strings(self):
+        assert "ref.read" not in blank_string_literals('log("ref.read(a)");')
+        assert "ref.read" not in blank_string_literals("log('''\nref.read(a)\n''');")
+        assert "ref.read" not in blank_string_literals("log(r'ref.read(a)');")
+
+    def test_comment_markers_inside_strings_are_not_comments(self):
+        out = blank_string_literals("final u = 'https://x.io'; ref.read(p);")
+        assert "ref.read(p);" in out
+
+    def test_quote_inside_a_comment_does_not_open_a_string(self):
+        out = blank_string_literals("// don't do this\nref.read(p);")
+        assert "ref.read(p);" in out
+
+    def test_unterminated_string_stops_at_the_newline(self):
+        out = blank_string_literals("log('oops\nref.read(p);")
+        assert "ref.read(p);" in out
+
+    def test_empty_string_and_adjacent_code_are_untouched(self):
+        assert blank_string_literals("a('', b);") == "a('', b);"
+
+    def test_code_without_strings_is_returned_unchanged(self):
+        src = "final a = ref.read(p);\nstate = a;"
+        assert blank_string_literals(src) == src

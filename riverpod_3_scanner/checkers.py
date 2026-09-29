@@ -12,7 +12,7 @@ License: MIT
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Pattern, Set, Tuple
 
 from .models import Violation, ViolationType, MethodKey
 from .utils import (
@@ -21,6 +21,7 @@ from .utils import (
     find_statement_end,
     strip_comments,
     remove_comments,
+    blank_string_literals,
     find_async_methods,
     find_methods_using_ref,
     has_significant_code_after_await,
@@ -90,6 +91,44 @@ def _find_callback_end(content: str, callback_start: int) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Helper: leftmost dangerous use vs. leftmost guard (the ONE owner of the
+# "guard must PRECEDE the first dangerous use" rule)
+# ---------------------------------------------------------------------------
+
+def _leftmost_unguarded_danger(
+    content: str,
+    danger_patterns: Iterable[Pattern[str]],
+    guard_pattern: Pattern[str],
+) -> Optional['re.Match[str]']:
+    """Return the leftmost dangerous use that NO guard precedes, else ``None``.
+
+    ``content`` is a span of code the caller has already reduced to what should
+    count (comments blanked, and string-literal text blanked where a message
+    could mimic a dangerous token). The leftmost match across ``danger_patterns``
+    is the *first* thing that can throw on a disposed host; the span is safe
+    only if ``guard_pattern`` occurs strictly before it. A guard AFTER the first
+    dangerous use does not protect that use, and ``None`` is returned only when
+    there is nothing dangerous or the first dangerous use is already guarded.
+
+    Used by the deferred-callback check (VIOLATION 10) and the catch-block check
+    (VIOLATION 6) so both judge "guarded" identically.
+    """
+    first_danger: Optional['re.Match[str]'] = None
+    for pattern in danger_patterns:
+        found = pattern.search(content)
+        if found is not None and (
+            first_danger is None or found.start() < first_danger.start()
+        ):
+            first_danger = found
+
+    if first_danger is None:
+        return None  # nothing to protect
+    if guard_pattern.search(content[:first_danger.start()]):
+        return None  # guarded before the first dangerous use
+    return first_danger
+
+
+# ---------------------------------------------------------------------------
 # Fix-instruction helper functions
 # ---------------------------------------------------------------------------
 
@@ -144,14 +183,37 @@ def _get_missing_mounted_after_await_fix() -> str:
    if (!ref.mounted) return;"""
 
 
-def _get_missing_mounted_in_catch_fix() -> str:
-    """Get fix instructions for missing mounted in catch."""
-    return """Add at start of catch block:
-   catch (e, st) {
-     if (!ref.mounted) return;
-     final logger = ref.read(myLoggerProvider);
-     logger.logError(...);
-   }"""
+def _get_missing_mounted_in_catch_fix(is_consumer_state: bool = False) -> str:
+    """Get fix instructions for a ref/state use in a catch block before its guard."""
+    if is_consumer_state:
+        guard = "if (!mounted) return;"
+        on_success = "setState(() => _data = data);"
+        on_failure = "setState(() => _failed = true);"
+    else:
+        guard = "if (!ref.mounted) return;"
+        on_success = "state = AsyncData(data);"
+        on_failure = "state = AsyncError(e, st);"
+    return f"""In every catch block: log FIRST through a logger captured while mounted,
+THEN guard before anything that touches ref / state:
+
+   {guard}
+   final logger = ref.read(myLoggerProvider);   // capture while mounted
+   try {{
+     final data = await operation();
+     {guard}
+     {on_success}
+   }} catch (e, st) {{
+     // Captured logger: safe to use after unmount, so the failure is never
+     // lost to a back-out.
+     logger.logError('Failed', error: e, stackTrace: st);
+     {guard}                        // guard BEFORE ref / state
+     {on_failure}
+   }}
+
+A value captured while mounted (the logger) is safe to use before the guard.
+A ref use is not: ref.read(...) / ref.watch(...) / state access must come AFTER
+the guard - including ref.read(myLoggerProvider), so capture the logger before
+the try, not inside the catch."""
 
 
 def _get_state_assign_await_fix() -> str:
@@ -568,6 +630,54 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
     return violations
 
 
+# What is dangerous to touch in a catch block once the host may be disposed:
+# any `ref.read/watch/listen/invalidate*`, and `state` access on the notifier
+# (`state = ...`, `state.…`, `this.state…`). `state` reached through another
+# object (`event.state`, `widget.state`) is not this host's state.
+_CATCH_DANGER_PATTERNS = (
+    re.compile(r'ref\.(read|watch|listen|invalidate)'),
+    re.compile(r'(?<![\w$.])state\s*[.=]|\bthis\.state\s*[.=]'),
+)
+
+# The condition of a POSITIVE mounted check — `if (mounted)` on a State,
+# `if (ref.mounted)` on a notifier, optionally `&& more` — as opposed to the
+# early-return guard `if (!mounted) return;`.
+_RE_POSITIVE_MOUNTED_CONDITION_STATE = re.compile(r'\s*mounted\s*(?:&&.*)?', re.DOTALL)
+_RE_POSITIVE_MOUNTED_CONDITION_NOTIFIER = re.compile(r'\s*ref\.mounted\s*(?:&&.*)?', re.DOTALL)
+_RE_IF_OPEN = re.compile(r'\bif\s*\(')
+
+
+def _blank_mounted_guarded_regions(code: str, condition: Pattern[str]) -> str:
+    """Blank every region a POSITIVE mounted check guards, keeping length/lines.
+
+    ``if (mounted) { ref.read(p); }`` is a guard for what is INSIDE its block (or
+    its single statement) and for nothing after it: the use in the block is safe,
+    a ``ref.read`` on the next line is not. The early-return guard protects
+    everything after it, which is what :func:`_leftmost_unguarded_danger`
+    models; a positive check protects a lexical region, so the region is removed
+    from what that comparison sees. An ``else`` branch is not part of the region.
+    """
+    length = len(code)
+    blanked = list(code)
+    for match in _RE_IF_OPEN.finditer(code):
+        cond_end = find_matching_paren(code, match.end())
+        if cond_end >= length or not condition.fullmatch(code[match.end():cond_end]):
+            continue
+        body_start = cond_end + 1
+        while body_start < length and code[body_start].isspace():
+            body_start += 1
+        if body_start >= length:
+            continue
+        if code[body_start] == '{':
+            body_end = find_matching_brace(code, body_start + 1) + 1
+        else:
+            body_end = find_statement_end(code, body_start) + 1
+        for k in range(body_start, min(body_end, length)):
+            if blanked[k] != '\n':
+                blanked[k] = ' '
+    return ''.join(blanked)
+
+
 # ===========================================================================
 # CHECKER 2: check_async_method_safety
 # ===========================================================================
@@ -591,6 +701,12 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         mounted_pattern = r'if\s*\(\s*!mounted\s*\)'
     else:
         mounted_pattern = r'if\s*\(\s*!ref\.mounted\s*\)'
+    mounted_re = re.compile(mounted_pattern)
+    positive_mounted_condition = (
+        _RE_POSITIVE_MOUNTED_CONDITION_STATE
+        if ctx.is_consumer_state
+        else _RE_POSITIVE_MOUNTED_CONDITION_NOTIFIER
+    )
 
     for method_name in ctx.async_methods:
         # Use .+? (non-greedy any char) instead of [^>]+ to handle nested
@@ -743,32 +859,54 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
                 ))
 
         # ---- VIOLATION 6: Missing mounted in catch blocks ----
+        # Judged over the WHOLE catch body: the leftmost ref/state use must be
+        # preceded by a mounted guard. Log-first catches (a value captured
+        # while mounted stays safe to use after unmount, so the failure is
+        # logged BEFORE the guard) put a multi-line `logger.logError(...)`
+        # ahead of the guard, so the guard can sit many lines in — a fixed
+        # look-ahead window would miss an unguarded `ref.read` after the log.
+        # Only ref/state uses are dangerous; a call on a captured value
+        # (`logger.logError(...)`) is not, so it may precede the guard. A
+        # positive check (`if (mounted) { ... }`) guards only its own block.
         catch_pattern = re.compile(r'catch\s*\([^)]+\)\s*\{')
         for catch_match in catch_pattern.finditer(method_body):
             catch_start = catch_match.end()
             catch_end = find_matching_brace(method_body, catch_start)
             catch_body = method_body[catch_start:catch_end]
 
-            catch_first_lines = '\n'.join(catch_body.split('\n')[:5])
-            has_mounted = re.search(mounted_pattern, catch_first_lines)
-            has_ref_usage = re.search(r'ref\.(read|watch|listen|invalidate)', catch_first_lines)
-            has_state_usage = re.search(r'\bstate\s*[.=]', catch_first_lines)
+            # Comments and string-literal text cannot hold a guard or a use —
+            # a log message like 'Could not restore state.' is not a state access.
+            # What a positive mounted check guards is safe by construction.
+            catch_code = _blank_mounted_guarded_regions(
+                blank_string_literals(remove_comments(catch_body)),
+                positive_mounted_condition,
+            )
+            danger = _leftmost_unguarded_danger(
+                catch_code, _CATCH_DANGER_PATTERNS, mounted_re
+            )
+            if danger is None:
+                continue
 
-            if (has_ref_usage or has_state_usage) and not has_mounted:
-                abs_line = full_content[:class_start + method_start + catch_match.start()].count('\n') + 1
-                snippet_start = max(0, abs_line - 1)
-                snippet_end = min(len(lines), abs_line + 8)
-                snippet = '\n'.join(f"  {i + 1:4d} | {lines[i]}" for i in range(snippet_start, snippet_end))
+            abs_line = full_content[:class_start + method_start + catch_match.start()].count('\n') + 1
+            danger_line = full_content[
+                :class_start + method_start + catch_start + danger.start()
+            ].count('\n') + 1
+            snippet_start = max(0, abs_line - 1)
+            snippet_end = min(len(lines), max(abs_line + 8, danger_line + 2))
+            snippet = '\n'.join(f"  {i + 1:4d} | {lines[i]}" for i in range(snippet_start, snippet_end))
 
-                violations.append(Violation(
-                    file_path=str(ctx.file_path),
-                    class_name=ctx.class_name,
-                    violation_type=ViolationType.MISSING_MOUNTED_IN_CATCH,
-                    line_number=abs_line,
-                    context=f"Method {method_name}(): Missing ref.mounted in catch block",
-                    code_snippet=snippet,
-                    fix_instructions=_get_missing_mounted_in_catch_fix(),
-                ))
+            violations.append(Violation(
+                file_path=str(ctx.file_path),
+                class_name=ctx.class_name,
+                violation_type=ViolationType.MISSING_MOUNTED_IN_CATCH,
+                line_number=abs_line,
+                context=(
+                    f"Method {method_name}(): Missing ref.mounted in catch block "
+                    f"({danger.group(0).strip()} at line {danger_line} runs before any mounted guard)"
+                ),
+                code_snippet=snippet,
+                fix_instructions=_get_missing_mounted_in_catch_fix(ctx.is_consumer_state),
+            ))
 
     return violations
 
@@ -2045,6 +2183,22 @@ AFTER (SAFE):
      logger.logError('Failed', error: e);
    });
 
+A .catchError callback is a DEFERRED callback: it runs later, so this scan
+requires the guard FIRST, before any logger / ref use inside it. A failure that
+arrives after the host is gone is therefore dropped here. When the failure must
+survive a back-out, use try { await ... } catch instead - there the logger is
+captured while mounted, so the catch can LOG FIRST and guard second:
+
+   if (!mounted) return;
+   final logger = ref.read(myLoggerProvider);   // capture while mounted
+   try {
+     await someAsyncOperation();
+     if (!mounted) return;
+   } catch (e, st) {
+     logger.logError('Failed', error: e, stackTrace: st);  // log first
+     if (!mounted) return;                                 // then guard before ref / state
+   }
+
 Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/blob/main/docs/GUIDE.md""",
     ),
     DeferredCallbackSpec(
@@ -2125,7 +2279,7 @@ BEFORE (CRASHES — Sentry 9CJ):
          await prefs.setBool('seen', true);
          ref.read(notifier.notifier).markStep();        // ❌ may be unmounted
        } catch (e) {
-         logger.logError('Failed', error: e);            // ❌ may be unmounted
+         logger.logError('Failed', error: e);
        }
      });
      return null;
@@ -2144,12 +2298,15 @@ AFTER (SAFE):
          ref.read(notifier.notifier).markStep();
          logger.logInfo('Marked');
        } catch (e) {
-         if (!context.mounted) return;                   // catch
-         logger.logError('Failed', error: e);
+         logger.logError('Failed', error: e);            // captured logger: log FIRST
+         if (!context.mounted) return;                   // then guard before context / ref
        }
      });
      return null;
    }, []);
+
+In a catch block, log FIRST through the logger captured while mounted, THEN
+guard before anything that touches ref / context / state.
 
 Pick the right gate for the host:
    - Notifier (`@riverpod class`) → `if (!ref.mounted) return;`
@@ -2286,39 +2443,23 @@ def check_deferred_callbacks(
             # safe pattern that follows it.
             callback_content = remove_comments(raw_callback_content)
 
-            # Find the leftmost position of any "dangerous" usage type the spec
-            # asks us to track. A usage is dangerous because it accesses
-            # `ref` (always), a lazy getter that closes over `ref`
-            # (.then/.catchError/.whenComplete), or a private helper method
-            # that probably accesses `ref` (Future.delayed/Future.microtask/
-            # scheduleMicrotask).
-            first_danger_pos: Optional[int] = None
-
-            ref_match = _RE_DEFERRED_CALLBACK_REF_USE.search(callback_content)
-            if ref_match is not None:
-                first_danger_pos = ref_match.start()
-
+            # The "dangerous" usage types the spec asks us to track. A usage is
+            # dangerous because it accesses `ref` (always), a lazy getter that
+            # closes over `ref` (.then/.catchError/.whenComplete), or a private
+            # helper method that probably accesses `ref` (Future.delayed/
+            # Future.microtask/scheduleMicrotask). The leftmost one must be
+            # preceded by a mounted guard — the comparison itself lives in
+            # `_leftmost_unguarded_danger`, shared with the catch-block check.
+            danger_patterns = [_RE_DEFERRED_CALLBACK_REF_USE]
             if spec.check_getters:
-                getter_match = _RE_DEFERRED_CALLBACK_GETTER_USE.search(callback_content)
-                if getter_match is not None and (
-                    first_danger_pos is None or getter_match.start() < first_danger_pos
-                ):
-                    first_danger_pos = getter_match.start()
-
+                danger_patterns.append(_RE_DEFERRED_CALLBACK_GETTER_USE)
             if spec.check_method_calls:
-                method_match = _RE_DEFERRED_CALLBACK_METHOD_USE.search(callback_content)
-                if method_match is not None and (
-                    first_danger_pos is None or method_match.start() < first_danger_pos
-                ):
-                    first_danger_pos = method_match.start()
+                danger_patterns.append(_RE_DEFERRED_CALLBACK_METHOD_USE)
 
-            if first_danger_pos is None:
-                continue  # nothing to protect — callback is safe
-
-            # Mounted guard must occur strictly before the first dangerous use.
-            head = callback_content[:first_danger_pos]
-            if mounted_pattern.search(head):
-                continue  # guarded — callback is safe
+            if _leftmost_unguarded_danger(
+                callback_content, danger_patterns, mounted_pattern
+            ) is None:
+                continue  # nothing dangerous, or the first dangerous use is guarded
 
             abs_line = ctx.full_content[:ctx.class_start + match.start()].count('\n') + 1
             snippet_start = max(0, abs_line - 1)

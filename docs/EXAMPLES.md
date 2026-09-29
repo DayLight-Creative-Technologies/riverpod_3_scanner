@@ -445,7 +445,7 @@ Future<void> multiStep() async {
 ### Type 6: Missing Mounted in Catch
 
 ```dart
-// ❌ WRONG - No check in catch block
+// ❌ WRONG - ref / state used in the catch block with no guard before it
 Future<void> riskyWork() async {
   if (!ref.mounted) return;
   final logger = ref.read(myLoggerProvider);
@@ -453,22 +453,34 @@ Future<void> riskyWork() async {
   try {
     await dangerousOperation();
   } catch (e, st) {
-    // No mounted check!
-    logger.logError('Failed', error: e, stackTrace: st);  // CRASH
+    logger.logError('Failed', error: e, stackTrace: st);
+    state = AsyncError(e, st);  // CRASH - no mounted guard before this state use,
+                                // however many lines the log call above spans
   }
 }
 
-// ✅ CORRECT - Check in catch
+// ❌ WRONG - the logger is read from ref INSIDE the catch, so it is a ref use
 Future<void> riskyWork() async {
   if (!ref.mounted) return;
-  final logger = ref.read(myLoggerProvider);
+  try {
+    await dangerousOperation();
+  } catch (e, st) {
+    ref.read(myLoggerProvider).logError('Failed', error: e, stackTrace: st);  // CRASH
+  }
+}
+
+// ✅ CORRECT - log FIRST through the captured logger, THEN guard
+Future<void> riskyWork() async {
+  if (!ref.mounted) return;
+  final logger = ref.read(myLoggerProvider);  // captured while mounted
 
   try {
     await dangerousOperation();
     if (!ref.mounted) return;
   } catch (e, st) {
-    if (!ref.mounted) return;  // ✅ Check first
-    logger.logError('Failed', error: e, stackTrace: st);
+    logger.logError('Failed', error: e, stackTrace: st);  // safe after unmount
+    if (!ref.mounted) return;                             // ✅ guard before state / ref
+    state = AsyncError(e, st);
   }
 }
 ```

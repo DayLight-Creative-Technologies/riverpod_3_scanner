@@ -578,6 +578,134 @@ def blank_comments(content: str) -> str:
     return ''.join(parts)
 
 
+def _blank_interpolated_string(
+    content: str, start: int, delim: str
+) -> Tuple[str, int]:
+    """Blank one non-raw string literal, keeping its delimiters and ``${...}``.
+
+    ``start`` is the position of the opening delimiter (``delim`` is ``'``,
+    ``"``, or a triple of either). Literal text — including ``$identifier``
+    shorthand and backslash escapes, so ``\\$`` never opens an interpolation —
+    becomes spaces. The expression inside a ``${...}`` interpolation is real
+    code that runs, so it is kept, recursively blanked since it may hold string
+    literals of its own (``'${map['key']}'``): the interpolation is delimited
+    with the string-aware :func:`find_matching_brace`, which is why this scans
+    the literal itself rather than using :func:`_skip_simple_string`, which would
+    end the literal at the first nested quote.
+
+    Returns:
+        ``(blanked_text, end)`` — the same-length replacement for
+        ``content[start:end]`` and the position just past the literal. A
+        single-line literal cut off by a newline, or any literal cut off by the
+        end of the fragment, has no closing delimiter.
+    """
+    length = len(content)
+    triple = len(delim) == 3
+    parts: List[str] = [delim]
+    i = start + len(delim)
+
+    while i < length:
+        if content.startswith(delim, i):
+            parts.append(delim)
+            return ''.join(parts), i + len(delim)
+
+        ch = content[i]
+        if ch == '\n' and not triple:
+            return ''.join(parts), i
+        if ch == '\\':
+            escaped = content[i + 1:i + 2]
+            parts.append(' ' + ('\n' if escaped == '\n' else ' ' if escaped else ''))
+            i += 2
+        elif ch == '$' and content.startswith('{', i + 1):
+            close = find_matching_brace(content, i + 2)
+            parts.append('${')
+            parts.append(blank_string_literals(content[i + 2:close]))
+            if close < length:
+                parts.append('}')
+            i = close + 1
+        else:
+            parts.append('\n' if ch == '\n' else ' ')
+            i += 1
+
+    return ''.join(parts), length
+
+
+def blank_string_literals(content: str) -> str:
+    """Replace the TEXT of Dart string literals with spaces, keeping code.
+
+    The delimiters (quotes, ``r`` prefix) stay, so the shape of the code around
+    a literal is intact; only what is *inside* the quotes is blanked. The
+    expression inside a ``${...}`` interpolation is code and is kept.
+
+    Why it exists: a checker that looks for ``ref.read(`` / ``state.`` in a span
+    of code must not match those tokens inside a log message — and the
+    log-first catch pattern puts a message string ahead of the guard, exactly
+    where the search runs. ``logger.logError('Could not restore state.')`` is
+    not a state access.
+
+    Comment-aware (a quote inside a comment does not open a string) and
+    length-preserving, like :func:`blank_comments`; callers that also want
+    comments gone run :func:`remove_comments` first.
+
+    Args:
+        content: Dart source code (possibly a fragment).
+
+    Returns:
+        Same-length code with string-literal text blanked to spaces.
+    """
+    parts: List[str] = []
+    i = 0
+    length = len(content)
+
+    while i < length:
+        m = _RE_CODE_SPECIAL.search(content, i)
+        if m is None:
+            parts.append(content[i:])
+            break
+
+        start = m.start()
+        if start > i:
+            parts.append(content[i:start])
+
+        token = m.group(0)
+        if token == '//':
+            j = content.find('\n', start + 2)
+            j = length if j == -1 else j
+            parts.append(content[start:j])
+            i = j
+        elif token == '/*':
+            j = content.find('*/', start + 2)
+            j = length if j == -1 else j + 2
+            parts.append(content[start:j])
+            i = j
+        elif token[0] == 'r':
+            if start > 0 and (content[start - 1].isalnum() or content[start - 1] == '_'):
+                parts.append('r')
+                i = start + 1
+            else:
+                # Raw string: no escapes, no interpolation — blank the interior.
+                quote = content[start + 1]
+                delim = quote * 3 if content.startswith(quote * 3, start + 1) else quote
+                j = _skip_raw_string(content, start + 1, length)
+                span = content[start:j]
+                open_len = 1 + len(delim)
+                closed = len(span) >= open_len + len(delim) and span.endswith(delim)
+                body_end = len(span) - len(delim) if closed else len(span)
+                interior = span[open_len:body_end]
+                parts.append(
+                    span[:open_len]
+                    + ''.join('\n' if c == '\n' else ' ' for c in interior)
+                    + span[body_end:]
+                )
+                i = j
+        else:
+            delim = token * 3 if content.startswith(token * 3, start) else token
+            blanked, i = _blank_interpolated_string(content, start, delim)
+            parts.append(blanked)
+
+    return ''.join(parts)
+
+
 def strip_comments(content: str) -> Tuple[str, Dict[int, int]]:
     """Blank comments from Dart code; positions are preserved.
 

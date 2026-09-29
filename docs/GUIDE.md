@@ -79,7 +79,7 @@ python3 riverpod_3_scanner.py lib --pattern "**/*_notifier.dart"
 | 3 | Async getters | `Future<T> get x async` with field caching | Production crash on unmount |
 | 4 | ref.read() before mounted | ref operations before mounted check | Production crash |
 | 5 | Missing mounted after await | No mounted check after async gap | Production crash |
-| 6 | Missing mounted in catch | No mounted check in catch blocks | Production crash |
+| 6 | Missing mounted in catch | A `ref` / `state` use in a catch block before its mounted guard (judged over the whole catch body) | Production crash |
 | 7 | Nullable field misuse | Direct `_field?.method()` when getter exists | Bypasses safety |
 | 8 | ref in lifecycle callbacks | ref.read() in ref.onDispose/ref.listen | AssertionError crash |
 | 9 | initState field access | Accessing cached fields before build() | Production crash |
@@ -423,10 +423,13 @@ Future<void> workWithErrors() async {
 
     logger.logInfo('Success');
   } catch (e, st) {
-    // CRITICAL: Check mounted in catch blocks
-    if (!ref.mounted) return;
-
+    // Log FIRST through the logger captured above: a value captured while
+    // mounted stays safe after unmount, so the failure is never lost.
     logger.logError('Failed', error: e, stackTrace: st);
+
+    // CRITICAL: guard BEFORE anything that touches ref / state.
+    if (!ref.mounted) return;
+    state = AsyncError(e, st);
   }
 }
 ```
@@ -733,7 +736,7 @@ pipelines:
 **Async Method is SAFE when**:
 - ✅ `if (!ref.mounted) return;` BEFORE any `ref.read()`
 - ✅ `if (!ref.mounted) return;` AFTER every `await`
-- ✅ `if (!ref.mounted) return;` in every `catch` block
+- ✅ Every `catch` block logs through a logger captured while mounted, THEN `if (!ref.mounted) return;` before any `ref` / `state` use
 - ✅ Dependencies read just-in-time, not cached in fields
 - ✅ `@Riverpod(keepAlive: true)` if called from deferred contexts
 - ✅ `dart analyze` returns "No issues found!"
@@ -750,7 +753,7 @@ pipelines:
 **Async Method is SAFE when**:
 - ✅ `if (!mounted) return;` BEFORE any `ref.read()` (widget's mounted, NOT ref.mounted)
 - ✅ `if (!mounted) return;` AFTER every `await`
-- ✅ `if (!mounted) return;` in every `catch` block
+- ✅ Every `catch` block logs through a logger captured while mounted, THEN `if (!mounted) return;` before any `ref` use
 - ✅ NO lazy getters in classes with async methods
 - ✅ NO field caching patterns in classes with async methods
 - ✅ Dependencies read just-in-time with mounted checks
@@ -913,11 +916,12 @@ if (!ref.mounted) return;  // MANDATORY
 ### Rule 3: Check mounted in Catch Blocks
 
 ```dart
+final logger = ref.read(myLoggerProvider);  // captured while mounted
 try {
   await work();
 } catch (e) {
-  if (!ref.mounted) return;  // MANDATORY
-  logger.logError('Failed', error: e);
+  logger.logError('Failed', error: e);  // captured logger: log FIRST
+  if (!ref.mounted) return;             // MANDATORY before any ref / state use
 }
 ```
 

@@ -5,6 +5,20 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-09-29
+
+### Fixed
+
+- **`missing_mounted_in_catch` (VIOLATION 6) — closed the fixed-window blind spot** (SocialScoreKeeper CAMERA-2026-001 chunk 08). The check inspected only the first 5 lines of a catch body. A log-first catch — log through a logger captured while mounted, THEN guard, so a failure is never lost to a back-out — puts a multi-line `logger.logError(\n  '…',\n  error: e,\n  stackTrace: st,\n);` ahead of the guard, and an UNGUARDED `ref.read` / `state =` after that log fell outside the window and was never reported. The same window also let a guard that came AFTER the first ref use satisfy the check, and a `ref.read(...)` inside a `${...}` interpolation hide behind a guard placed within the first 5 lines.
+  - The catch body is now judged as a whole: the **leftmost `ref.read/watch/listen/invalidate*` or `state` use must be preceded by a mounted guard**. A call on a value captured while mounted (`logger.logError(...)`) is not a ref use and may precede the guard; `ref.read(myLoggerProvider).logError(...)` is a ref use and may not.
+  - **One owner for the rule.** The "guard must PRECEDE the first dangerous use" comparison that the deferred-callback check (VIOLATION 10) carried inline is extracted to `_leftmost_unguarded_danger` and both checks call it, so "guarded" is judged identically everywhere.
+  - **A positive check guards only its own block.** `if (mounted) { … }` / `if (ref.mounted) { … }` (also brace-less, and compound `mounted && x`) protects what is inside it — so the idiomatic `if (ref.mounted) { ref.read(p).release(); }` is clean — but not an `else` branch or anything after the block.
+  - **Message text and comments are not code.** Comments are blanked and string-literal text is blanked before the search (new `blank_string_literals` in `utils.py`, length-preserving; `${...}` interpolation expressions are kept because they run). Without this the log-first shape — a message string sitting ahead of the guard — would false-positive on `logger.logError('Could not restore state.')`. `state` reached through another object (`snapshot.state.name`) is not this host's state.
+  - The reported line is still the `catch` line; the context now names the offending use and its line, and the snippet extends to it.
+- **Printed advice now teaches log-first-then-guard.** The catch-block fix (host-specific: `if (!ref.mounted)` + `state =` for notifiers, `if (!mounted)` + `setState` for `ConsumerState`) shows the captured logger, the log, the guard, then the ref/state use, and says why a `ref.read(myLoggerProvider)` inside the catch is itself a ref use. The `Future.microtask` advice's catch sample is reordered the same way. The `.catchError(...)` advice keeps guard-first — a `.catchError` callback is a deferred callback this scan requires to guard FIRST — and now points to `try { await … } catch` (log first, guard second) for a failure that must survive a back-out. `docs/GUIDE.md` and `docs/EXAMPLES.md` teach the same order.
+- **Behavior note for adopters:** a codebase that was green may now report `missing_mounted_in_catch` — every new report is a ref/state use in a catch that runs before any guard.
+- **Tests: 123** (was 77). Two log-first fixtures pinned to exact `(type, line)` in both directions (violations: multi-line log then unguarded `ref.read` / `state =`, `ref.read` logger before the guard, guard after the first use, interpolated `ref.read`, `else`-branch use, use after a positive block; passing: the safe order, log-only, messages and comments that mention `ref` / `state`, member `state`, positive blocks), the two SSK probes as inline cases, advice-text assertions, and unit tests for the shared helper and `blank_string_literals`.
+
 ## [1.13.2] - 2026-08-12
 
 ### Fixed

@@ -41,6 +41,24 @@ EXPECTED = {
         ("missing_mounted_in_catch", 32),
         ("missing_mounted_in_catch", 44),
     ],
+    # Log-first catch blocks (log through a logger captured while mounted, THEN
+    # guard): VIOLATION 6 judges the WHOLE catch body — leftmost ref/state use vs
+    # leftmost guard — so a ref/state use after a multi-line log is caught, and
+    # a captured-logger call / a message or comment that merely MENTIONS ref or
+    # state before the guard is not. A POSITIVE check (`if (mounted) { ... }`)
+    # guards only its own block — a use in the `else` branch or after the block
+    # is still unguarded.
+    "catch_block_log_first_passing.dart": [],
+    "catch_block_log_first_violations.dart": [
+        ("missing_mounted_in_catch", 24),
+        ("missing_mounted_in_catch", 41),
+        ("missing_mounted_in_catch", 58),
+        ("missing_mounted_in_catch", 73),
+        ("missing_mounted_in_catch", 89),
+        ("missing_mounted_in_catch", 106),
+        ("missing_mounted_in_catch", 136),
+        ("missing_mounted_in_catch", 154),
+    ],
     "event_handler_params_passing.dart": [],
     "event_handler_params_violations.dart": [
         ("deferred_callback_unsafe_ref", 15),
