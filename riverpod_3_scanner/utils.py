@@ -578,20 +578,39 @@ def blank_comments(content: str) -> str:
     return ''.join(parts)
 
 
+# A SIMPLE interpolation: ``$`` immediately followed by an identifier. The
+# identifier is ``IDENTIFIER_NO_DOLLAR`` in the Dart grammar — ASCII letters,
+# digits and ``_``, never starting with a digit, ending at the first other
+# character. So ``$state.name`` interpolates ``state`` (``.name`` is literal
+# text) and ``$stateful`` interpolates ``stateful``, not ``state``.
+_RE_SIMPLE_INTERPOLATION = re.compile(r'\$[A-Za-z_][A-Za-z0-9_]*')
+
+
 def _blank_interpolated_string(
     content: str, start: int, delim: str
 ) -> Tuple[str, int]:
-    """Blank one non-raw string literal, keeping its delimiters and ``${...}``.
+    """Blank one non-raw string literal, keeping its delimiters and interpolations.
 
     ``start`` is the position of the opening delimiter (``delim`` is ``'``,
-    ``"``, or a triple of either). Literal text — including ``$identifier``
-    shorthand and backslash escapes, so ``\\$`` never opens an interpolation —
-    becomes spaces. The expression inside a ``${...}`` interpolation is real
-    code that runs, so it is kept, recursively blanked since it may hold string
-    literals of its own (``'${map['key']}'``): the interpolation is delimited
-    with the string-aware :func:`find_matching_brace`, which is why this scans
-    the literal itself rather than using :func:`_skip_simple_string`, which would
-    end the literal at the first nested quote.
+    ``"``, or a triple of either). Literal text — including backslash escapes,
+    so ``\\$`` never opens an interpolation — becomes spaces.
+
+    Both interpolation forms are real code that runs when the string is built,
+    so both are kept:
+
+    * ``${expr}`` — the expression is kept, recursively blanked since it may
+      hold string literals of its own (``'${map['key']}'``): it is delimited
+      with the string-aware :func:`find_matching_brace`, which is why this scans
+      the literal itself rather than using :func:`_skip_simple_string`, which
+      would end the literal at the first nested quote.
+    * ``$identifier`` — ``$`` and the identifier are kept verbatim. ``'$state'``
+      reads the ``state`` getter exactly as ``'${state}'`` does, and a notifier's
+      getter throws once the notifier is disposed. Only the text AFTER the
+      identifier is literal (``'$state.name'`` reads ``state``, then prints
+      ``.name``), so that text is blanked.
+
+    A ``$`` followed by neither ``{`` nor an identifier start (``'$$'``,
+    ``'costs $5'``, a trailing ``'$'``) is a literal dollar sign and is blanked.
 
     Returns:
         ``(blanked_text, end)`` — the same-length replacement for
@@ -623,6 +642,9 @@ def _blank_interpolated_string(
             if close < length:
                 parts.append('}')
             i = close + 1
+        elif ch == '$' and (simple := _RE_SIMPLE_INTERPOLATION.match(content, i)):
+            parts.append(simple.group(0))
+            i = simple.end()
         else:
             parts.append('\n' if ch == '\n' else ' ')
             i += 1
@@ -634,8 +656,11 @@ def blank_string_literals(content: str) -> str:
     """Replace the TEXT of Dart string literals with spaces, keeping code.
 
     The delimiters (quotes, ``r`` prefix) stay, so the shape of the code around
-    a literal is intact; only what is *inside* the quotes is blanked. The
-    expression inside a ``${...}`` interpolation is code and is kept.
+    a literal is intact; only what is *inside* the quotes is blanked. Both
+    interpolation forms are code and are kept — the expression inside
+    ``${...}`` and the identifier of a simple ``$identifier`` (``'$state'``
+    reads ``state``). A raw string (``r'...'``) has no interpolation, so its
+    whole interior is blanked.
 
     Why it exists: a checker that looks for ``ref.read(`` / ``state.`` in a span
     of code must not match those tokens inside a log message — and the

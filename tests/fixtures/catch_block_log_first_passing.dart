@@ -170,4 +170,65 @@ class PositiveGuardStatePassing extends ConsumerState<LogFirstWidget> {
   Widget build(BuildContext context) => const SizedBox();
 }
 
+@riverpod
+class InterpolatedStateNotifierPassing extends _$InterpolatedStateNotifierPassing {
+  @override
+  int build() => 0;
+
+  // PASSING: a raw string has no interpolation — `$state` is literal text.
+  Future<void> rawStringMentionsState() async {
+    if (!ref.mounted) return;
+    final logger = ref.read(loggerProvider);
+    try {
+      await someApi();
+      if (!ref.mounted) return;
+      state = 1;
+    } catch (e) {
+      logger.logError(r'failed, last value $state.');
+    }
+  }
+
+  // PASSING: an escaped dollar is a literal `$` — there is no interpolation.
+  Future<void> escapedDollarMentionsState() async {
+    if (!ref.mounted) return;
+    final logger = ref.read(loggerProvider);
+    try {
+      await someApi();
+      if (!ref.mounted) return;
+      state = 1;
+    } catch (e) {
+      logger.logError('failed, last value \$state.');
+    }
+  }
+
+  // PASSING: `$stateful` interpolates the identifier `stateful`, not `state`.
+  Future<void> longerIdentifierIsNotState() async {
+    if (!ref.mounted) return;
+    final logger = ref.read(loggerProvider);
+    final stateful = 'x';
+    try {
+      await someApi();
+      if (!ref.mounted) return;
+      state = 1;
+    } catch (e) {
+      logger.logError('failed, last value $stateful.');
+    }
+  }
+
+  // PASSING: the guard precedes the interpolated state read.
+  Future<void> guardThenInterpolatedState() async {
+    if (!ref.mounted) return;
+    final logger = ref.read(loggerProvider);
+    try {
+      await someApi();
+      if (!ref.mounted) return;
+      state = 1;
+    } catch (e) {
+      logger.logError('failed');
+      if (!ref.mounted) return;
+      logger.logError('last value $state.');
+    }
+  }
+}
+
 Future<String> someApi() async => 'data';

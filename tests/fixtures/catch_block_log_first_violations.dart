@@ -165,4 +165,52 @@ class PositiveGuardStateViolations extends ConsumerState<LogFirstWidget> {
   Widget build(BuildContext context) => const SizedBox();
 }
 
+@riverpod
+class InterpolatedStateNotifierViolations extends _$InterpolatedStateNotifierViolations {
+  @override
+  int build() => 0;
+
+  // VIOLATION: `$state` inside a message is a state READ — the getter runs when
+  // the string is built and throws on a disposed notifier. v1.14.0 blanked the
+  // `$identifier` shorthand as literal text and missed this (v1.14.1).
+  Future<void> simpleInterpolationOfState() async {
+    if (!ref.mounted) return;
+    final logger = ref.read(loggerProvider);
+    try {
+      await someApi();
+      if (!ref.mounted) return;
+      state = 1;
+    } catch (e) {
+      logger.logError('failed, last value $state.');
+    }
+  }
+
+  // VIOLATION: the braced form of the same read, in a triple-quoted string.
+  Future<void> bracedInterpolationOfState() async {
+    if (!ref.mounted) return;
+    final logger = ref.read(loggerProvider);
+    try {
+      await someApi();
+      if (!ref.mounted) return;
+      state = 1;
+    } catch (e) {
+      logger.logError('''failed
+        last value ${state}''');
+    }
+  }
+
+  // VIOLATION: a string nested inside an interpolation still interpolates.
+  Future<void> nestedInterpolationOfState() async {
+    if (!ref.mounted) return;
+    final logger = ref.read(loggerProvider);
+    try {
+      await someApi();
+      if (!ref.mounted) return;
+      state = 1;
+    } catch (e) {
+      logger.logError('failed ${'last value $state'}');
+    }
+  }
+}
+
 Future<String> someApi() async => 'data';

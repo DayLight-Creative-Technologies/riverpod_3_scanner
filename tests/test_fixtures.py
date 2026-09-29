@@ -58,6 +58,11 @@ EXPECTED = {
         ("missing_mounted_in_catch", 106),
         ("missing_mounted_in_catch", 136),
         ("missing_mounted_in_catch", 154),
+        # `$state` / `${state}` inside a message is a state read (v1.14.1: v1.14.0
+        # blanked the `$identifier` shorthand and missed it).
+        ("missing_mounted_in_catch", 183),
+        ("missing_mounted_in_catch", 196),
+        ("missing_mounted_in_catch", 210),
     ],
     "event_handler_params_passing.dart": [],
     "event_handler_params_violations.dart": [

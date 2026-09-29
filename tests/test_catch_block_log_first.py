@@ -354,3 +354,107 @@ class TestBlankMountedGuardedRegions:
     def test_unrelated_conditions_are_untouched(self):
         code = "if (retries < 3) { ref.read(p); }"
         assert _blank_mounted_guarded_regions(code, self.STATE) == code
+
+
+# ---------------------------------------------------------------------------
+# A string INTERPOLATION is code. `'$state'` and `'${state}'` read the notifier's
+# `state` getter when the string is built, and the getter throws on a disposed
+# notifier (riverpod 3.4.3 lib/src/core/provider/notifier_provider.dart:81-85,
+# `_throwIfInvalidUsage()`). v1.14.0 blanked the `$identifier` shorthand as if
+# it were literal text, so `logger.logError('last value $state.')` before the
+# guard went unreported; v1.14.1 keeps it.
+# ---------------------------------------------------------------------------
+
+INTERPOLATION_TEMPLATE = """\
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+part 'foo.g.dart';
+
+@riverpod
+class Foo extends _$Foo {
+  @override
+  int build() => 0;
+
+  Future<void> doIt() async {
+    if (!ref.mounted) return;
+    final logger = ref.read(unifiedLoggerProvider);
+    final stateful = 'x';
+    try {
+      await Future<void>.delayed(Duration.zero);
+      if (!ref.mounted) return;
+      state = 1;
+    } catch (e) {
+__CATCH_BODY__
+    }
+  }
+}
+"""
+
+
+def _interpolation_source(catch_body):
+    indented = "\n".join(f"      {line}" if line else line for line in catch_body.split("\n"))
+    return INTERPOLATION_TEMPLATE.replace("__CATCH_BODY__", indented)
+
+
+@pytest.mark.parametrize(
+    "catch_body",
+    [
+        pytest.param("logger.logError('failed, last value $state.');", id="ssk-fixture-simple-then-period"),
+        pytest.param("logger.logError('last value $state');", id="simple-bare"),
+        pytest.param('logger.logError("last value $state");', id="simple-double-quoted"),
+        pytest.param("logger.logError('last value ${state}');", id="braced-bare"),
+        pytest.param("logger.logError('last value ${ state }');", id="braced-bare-spaced"),
+        pytest.param("logger.logError('last value ${this.state}');", id="braced-this-state"),
+        pytest.param("logger.logError('last value ${state.x}');", id="braced-member-access"),
+        pytest.param("logger.logError('''\n  last value $state\n''');", id="triple-quoted"),
+        pytest.param("logger.logError('failed ' 'last value $state');", id="adjacent-strings"),
+        pytest.param("logger.logError('failed ${'last value $state'}');", id="nested-in-braced-interpolation"),
+        pytest.param("logger.logError('cost $$state');", id="after-a-literal-dollar"),
+        pytest.param("logger.logError('$e $state');", id="after-another-interpolation"),
+        pytest.param("logger.logError('$e$state');", id="adjacent-interpolations"),
+        pytest.param(
+            "logger.logError('last value $state.');\nif (!ref.mounted) return;",
+            id="guard-after-the-use-does-not-protect-it",
+        ),
+    ],
+)
+def test_state_read_through_an_interpolation_before_the_guard_is_flagged(tmp_path, catch_body):
+    found = _catch_violations(_scan(tmp_path, _interpolation_source(catch_body)))
+    assert len(found) == 1
+    assert "state" in found[0].context
+
+
+@pytest.mark.parametrize(
+    "catch_body",
+    [
+        pytest.param("logger.logError(r'last value $state.');", id="raw-string"),
+        pytest.param("logger.logError(r'last value ${state}');", id="raw-string-braced"),
+        pytest.param("logger.logError('last value \\$state.');", id="escaped-dollar"),
+        pytest.param("logger.logError('last value \\${state}');", id="escaped-dollar-braced"),
+        pytest.param("logger.logError('last value $stateful.');", id="longer-identifier-stateful"),
+        pytest.param("logger.logError('last value $state_x $state2 $statement');", id="longer-identifiers"),
+        pytest.param("logger.logError('last value ${stateful}');", id="braced-longer-identifier"),
+        pytest.param("logger.logError('last value $this.state');", id="this-then-literal-dot-state"),
+        pytest.param("logger.logError('cost $5');", id="literal-dollar-before-a-digit"),
+        pytest.param("logger.logError(r'$state' 'ok');", id="raw-adjacent-to-plain"),
+        pytest.param("logger.logError('failed'); // last value $state", id="line-comment"),
+        pytest.param(
+            "logger.logError('failed');\nif (!ref.mounted) return;\nlogger.logError('last value $state.');",
+            id="guard-then-interpolation",
+        ),
+        pytest.param(
+            "logger.logError('failed');\nif (ref.mounted) {\n  logger.logError('last value $state.');\n}",
+            id="positive-guard-block",
+        ),
+    ],
+)
+def test_text_that_only_looks_like_a_state_read_is_clean(tmp_path, catch_body):
+    assert _catch_violations(_scan(tmp_path, _interpolation_source(catch_body))) == []
+
+
+def test_interpolation_violation_is_reported_on_the_catch_line_naming_the_use(tmp_path):
+    source = _interpolation_source("logger.logError('failed, last value $state.');")
+    (violation,) = _catch_violations(_scan(tmp_path, source))
+    catch_line = source.split("\n").index("    } catch (e) {") + 1
+    assert violation.line_number == catch_line
+    assert f"$state at line {catch_line + 1}" in violation.context

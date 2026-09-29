@@ -169,11 +169,61 @@ class TestBlankStringLiterals:
         assert "ref.read(idProvider)" in out
         assert "for" not in out and "done" not in out
 
-    def test_dollar_identifier_shorthand_is_literal_text(self):
-        assert "state" not in blank_string_literals("log('at $state.name');")
+    def test_simple_interpolation_identifier_is_code_and_kept(self):
+        # `$state.name` reads `state`; only `.name` is literal text. v1.14.0
+        # blanked the identifier as if it were literal and hid the read.
+        out = blank_string_literals("log('at $state.name');")
+        assert out == "log('   $state     ');"
+
+    def test_simple_interpolation_ends_at_the_first_non_identifier_character(self):
+        # `$stateful` interpolates `stateful` — kept whole, so a matcher for
+        # `state` sees a longer identifier and not `state`.
+        assert blank_string_literals("log('a $stateful b');") == "log('  $stateful  ');"
+        assert blank_string_literals("log('$state_x $state2');") == "log('$state_x $state2');"
+
+    def test_adjacent_simple_interpolations_are_all_kept(self):
+        assert blank_string_literals("log('$a$state');") == "log('$a$state');"
+
+    def test_this_is_a_simple_interpolation(self):
+        assert blank_string_literals('log("x $this.state");') == 'log("  $this      ");'
+
+    def test_literal_dollar_signs_are_blanked(self):
+        # `$` followed by neither `{` nor an identifier start is a literal `$`.
+        assert blank_string_literals("log('costs $5 and $');") == "log('              ');"
+        # `$$state`: the first `$` is literal, the second opens `$state`.
+        assert blank_string_literals("log('$$state');") == "log(' $state');"
+
+    def test_simple_interpolation_in_double_and_triple_quoted_strings(self):
+        assert blank_string_literals('log("v $state");') == 'log("  $state");'
+        out = blank_string_literals("log('''a $state\nb $ref.read''');")
+        assert out == "log('''  $state\n  $ref     ''');"
+
+    def test_simple_interpolation_in_adjacent_strings(self):
+        out = blank_string_literals("log('a ' 'b $state');")
+        assert out == "log('  ' '  $state');"
+
+    def test_simple_interpolation_nested_in_a_braced_interpolation(self):
+        out = blank_string_literals("log('${'$state'}');")
+        assert out == "log('${'$state'}');"
+        out = blank_string_literals("log('x ${f('y $state z')} w');")
+        assert out == "log('  ${f('  $state  ')}  ');"
+
+    def test_raw_string_has_no_interpolation(self):
+        assert blank_string_literals("log(r'$state');") == "log(r'      ');"
+        interior = "a ${state} $ref"
+        assert blank_string_literals(f'log(r"{interior}");') == f'log(r"{" " * len(interior)}");'
+        assert blank_string_literals("log(r'''\n$state\n''');") == "log(r'''\n      \n''');"
+
+    def test_interpolation_keeps_length_and_newlines(self):
+        src = "log('$a ${b} \\$c $$d $e_f');\nlog('''\n$g\n''');"
+        out = blank_string_literals(src)
+        assert len(out) == len(src) and out.count("\n") == src.count("\n")
 
     def test_escaped_dollar_does_not_open_an_interpolation(self):
         assert "ref.read" not in blank_string_literals("log('cost \\${ref.read(x)}');")
+        # ...nor a simple one: `\$state` is the literal text `$state`.
+        interior = "cost \\$state"
+        assert blank_string_literals(f"log('{interior}');") == f"log('{' ' * len(interior)}');"
 
     def test_nested_string_inside_interpolation_is_blanked_recursively(self):
         out = blank_string_literals("log('a ${f('ref.read(y)')} b');")

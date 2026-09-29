@@ -634,9 +634,19 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
 # any `ref.read/watch/listen/invalidate*`, and `state` access on the notifier
 # (`state = ...`, `state.…`, `this.state…`). `state` reached through another
 # object (`event.state`, `widget.state`) is not this host's state.
+#
+# `state` read through a string interpolation is a state access too: the getter
+# runs when the string is built and throws on a disposed notifier. The third
+# pattern is that shape — `$state` and a bare `${state}` / `${this.state}`.
+# (`${state.x}` is already covered by the second pattern.) It runs on text that
+# `blank_string_literals` has already reduced: literal text and raw strings are
+# blanked, so a `$state` still present is a real interpolation, and the
+# identifier ends where Dart's simple interpolation ends — `$stateful` reads
+# `stateful`, not `state`.
 _CATCH_DANGER_PATTERNS = (
     re.compile(r'ref\.(read|watch|listen|invalidate)'),
     re.compile(r'(?<![\w$.])state\s*[.=]|\bthis\.state\s*[.=]'),
+    re.compile(r'\$(?:state(?![A-Za-z0-9_])|\{\s*(?:this\.)?state\s*\})'),
 )
 
 # The condition of a POSITIVE mounted check — `if (mounted)` on a State,
