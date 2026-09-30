@@ -105,32 +105,44 @@ def _leftmost_unguarded_danger(
     danger_patterns: Iterable[Pattern[str]],
     guard_pattern: Pattern[str],
 ) -> Optional['re.Match[str]']:
-    """Return the leftmost dangerous use that NO guard precedes, else ``None``.
+    """Return the leftmost dangerous use that NO guard dominates, else ``None``.
 
     ``content`` is a span of code the caller has already reduced to what should
     count (comments blanked, and string-literal text blanked where a message
-    could mimic a dangerous token). The leftmost match across ``danger_patterns``
-    is the *first* thing that can throw on a disposed host; the span is safe
-    only if ``guard_pattern`` occurs strictly before it. A guard AFTER the first
-    dangerous use does not protect that use, and ``None`` is returned only when
-    there is nothing dangerous or the first dangerous use is already guarded.
+    could mimic a dangerous token). A guard dominates a use when it occurs
+    strictly before the use AND inside a block that also contains the use: an
+    early-return guard protects the rest of ITS block and nothing outside it.
+    So ``if (url != null) { await go(); if (!ref.mounted) return; }`` followed
+    by ``ref.read(p)`` leaves that read unguarded when ``url`` is null. A guard
+    AFTER a use never protects it. ``None`` is returned only when every
+    dangerous use is dominated by a guard.
 
-    Used by the deferred-callback check (VIOLATION 10) and the catch-block check
-    (VIOLATION 6) so both judge "guarded" identically.
+    Used by the deferred-callback check (VIOLATION 10), the catch / finally
+    checks (VIOLATION 6 / 6b) and the notifier UI-callback check (15b), so all
+    judge "guarded" identically.
     """
-    first_danger: Optional['re.Match[str]'] = None
-    for pattern in danger_patterns:
-        found = pattern.search(content)
-        if found is not None and (
-            first_danger is None or found.start() < first_danger.start()
-        ):
-            first_danger = found
+    guard_blocks: List[Tuple[int, int]] = []
+    for guard in guard_pattern.finditer(content):
+        block_end = len(content)
+        depth = 0
+        for k in range(guard.start() - 1, -1, -1):
+            if content[k] == '}':
+                depth += 1
+            elif content[k] == '{':
+                if depth == 0:
+                    block_end = find_matching_brace(content, k + 1)
+                    break
+                depth -= 1
+        guard_blocks.append((guard.start(), block_end))
 
-    if first_danger is None:
-        return None  # nothing to protect
-    if guard_pattern.search(content[:first_danger.start()]):
-        return None  # guarded before the first dangerous use
-    return first_danger
+    dangers = sorted(
+        (found for pattern in danger_patterns for found in pattern.finditer(content)),
+        key=lambda m: m.start(),
+    )
+    for danger in dangers:
+        if not any(start < danger.start() < end for start, end in guard_blocks):
+            return danger
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -3856,4 +3868,63 @@ def check_catch_guard_returns_success(
             code_snippet=extract_snippet(lines, handler_line, before=0, after=max(4, guard_line - handler_line + 1)),
             fix_instructions=_get_catch_guard_returns_success_fix(),
         ))
+    return violations
+
+
+# ===========================================================================
+# CHECKER 17: check_notifier_ui_callbacks (VIOLATION 15b)
+# ===========================================================================
+
+_RE_NOTIFIER_MOUNTED_GUARD = re.compile(r'if\s*\(\s*!\s*ref\s*\.\s*mounted\b')
+
+
+def check_notifier_ui_callbacks(ctx: CheckContext) -> List[Violation]:
+    """VIOLATION 15b: a UI event-handler closure built by a NOTIFIER that uses
+    ref / state before a `ref.mounted` guard.
+
+    A notifier that renders a dialog or sheet hands closures like
+    `onPressed: () { ref.read(p).record(); }` to widgets. They run when the user
+    taps — long after the notifier method returned, possibly after the notifier
+    was disposed (sign-out invalidation, auto-dispose). Unlike a widget's own
+    handler, EVERY use in such a closure is deferred, sync or async, so the
+    first ref / state use must follow `if (!ref.mounted) return;` — or, better,
+    use a value read while mounted and passed in.
+    Reported as DEFERRED_CALLBACK_UNSAFE_REF (same class as VIOLATION 10).
+    """
+    violations: List[Violation] = []
+    code = blank_string_literals(remove_comments(ctx.class_content))
+    for handler in EVENT_HANDLERS:
+        pattern = re.compile(rf'\b{handler}\s*:\s*\(([^)]*)\)\s*(?:async\s*)?\{{')
+        for match in pattern.finditer(code):
+            body_open = match.end()
+            body_close = find_matching_brace(code, body_open)
+            body = _blank_mounted_guarded_regions(code[body_open:body_close], _RE_POSITIVE_MOUNTED_CONDITION_NOTIFIER)
+            danger = _leftmost_unguarded_danger(body, _CATCH_DANGER_PATTERNS, _RE_NOTIFIER_MOUNTED_GUARD)
+            if danger is None:
+                continue
+            abs_line = ctx.full_content[:ctx.class_start + match.start()].count('\n') + 1
+            use_line = ctx.full_content[:ctx.class_start + body_open + danger.start()].count('\n') + 1
+            violations.append(Violation(
+                file_path=str(ctx.file_path),
+                class_name=ctx.class_name,
+                violation_type=ViolationType.DEFERRED_CALLBACK_UNSAFE_REF,
+                line_number=abs_line,
+                context=(
+                    f"Notifier builds a {handler} callback that uses {danger.group(0).strip()} "
+                    f"(line {use_line}) before a ref.mounted guard: it runs on a tap, after the notifier may be disposed"
+                ),
+                code_snippet=extract_snippet(ctx.lines, abs_line, before=0, after=max(4, use_line - abs_line + 1)),
+                fix_instructions="""A closure a notifier hands to a widget (onPressed / onTap / ...) runs when the
+user taps, long after the notifier method returned and possibly after the
+notifier was disposed. Read what the closure needs while mounted and pass it in:
+
+   final service = ref.read(myServiceProvider);   // in the method, while mounted
+   ...
+   onPressed: () {
+     Navigator.of(dialogContext).pop();
+     service.record();                            // no ref in the closure
+   },
+
+Or guard first: `onPressed: () { if (!ref.mounted) return; ref.read(...); }`.""",
+            ))
     return violations

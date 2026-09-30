@@ -110,6 +110,7 @@ from .checkers import (
     check_build_listen_sync_state_mutation,
     check_log_after_mounted_guard,
     check_catch_guard_returns_success,
+    check_notifier_ui_callbacks,
 )
 from .output import format_violation_text, print_summary_text, format_json
 
@@ -202,6 +203,7 @@ class RiverpodScanner:
             # false-positive on captured-parameter patterns common in
             # service-class notifiers.
             violations.extend(check_deferred_callbacks(ctx, notifier_scope=True))
+            violations.extend(check_notifier_ui_callbacks(ctx))
             # Build-phase provider modification: a build()-registered ref.listen
             # on a SYNC provider whose callback mutates state synchronously
             # (SocialScoreKeeper gaps #376/#381). Needs cross-file async-ness, so
