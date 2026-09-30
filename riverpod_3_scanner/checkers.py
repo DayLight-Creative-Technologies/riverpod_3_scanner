@@ -3517,6 +3517,8 @@ _RE_LOG_CALL = re.compile(
 )
 _RE_CATCH_HEAD = re.compile(r'\bcatch\s*\(')
 _RE_CATCH_ERROR_HEAD = re.compile(r'\.\s*catchError\s*\(')
+# A named error callback: `stream.listen(…, onError: (e, st) { … })`, `.then(…, onError: …)`.
+_RE_ON_ERROR_HEAD = re.compile(r'\bonError\s*:\s*')
 # `mounted` / `ref.mounted` / `context.mounted` / `state.context.mounted`, and
 # RoutePresence's `isOnActiveRoute` — every one is false once the host is gone.
 _RE_PRESENCE_TERM = r'\s*(?:[A-Za-z_]\w*\s*\.\s*)*(?:mounted|isOnActiveRoute)\s*'
@@ -3658,9 +3660,24 @@ def _log_lost_on_back_out(code: str, start: int, end: int) -> Optional[int]:
     return logs[0]
 
 
-def _get_log_after_mounted_guard_fix(is_catch_error: bool) -> str:
+def _get_log_after_mounted_guard_fix(kind: str) -> str:
     """Fix instructions for a failure handler that logs only after its guard."""
-    if is_catch_error:
+    if kind == 'onError callback':
+        return """This onError callback logs only after its mounted guard, so an error that
+arrives after the host is gone is never recorded. Capture the logger while
+mounted (before subscribing) and log FIRST, then guard before anything that
+touches ref / context / state:
+
+   final logger = ref.read(unifiedLoggerProvider);   // capture while mounted
+   _sub = stream.listen(
+     onData,
+     onError: (Object e, StackTrace st) {
+       logger.logError('Stream failed', error: e, stackTrace: st);   // log FIRST
+       if (!mounted) return;                                        // THEN guard
+       // ... show the failure
+     },
+   );"""
+    if kind == '.catchError callback':
         return """This .catchError callback logs only after its mounted guard, so a failure
 that lands after a back-out is never recorded. A .catchError callback must guard
 first (Gate 1), so convert it to try / await / catch and log first:
@@ -3722,7 +3739,7 @@ def check_log_after_mounted_guard(
     violations: List[Violation] = []
     code = blank_string_literals(remove_comments(content))
 
-    handlers: List[Tuple[int, int, int, bool]] = []  # (report_pos, body_open, body_close, is_catch_error)
+    handlers: List[Tuple[int, int, int, str]] = []  # (report_pos, body_open, body_close, kind)
     for head in _RE_CATCH_HEAD.finditer(code):
         params_close = find_matching_paren(code, head.end())
         brace = params_close + 1
@@ -3730,27 +3747,27 @@ def check_log_after_mounted_guard(
             brace += 1
         if brace >= len(code) or code[brace] != '{':
             continue
-        handlers.append((head.start(), brace + 1, find_matching_brace(code, brace + 1), False))
-    for head in _RE_CATCH_ERROR_HEAD.finditer(code):
-        callback = head.end()
-        while callback < len(code) and code[callback].isspace():
-            callback += 1
-        if callback >= len(code) or code[callback] != '(':
-            continue  # a tear-off or a named handler, not a function literal
-        params_close = find_matching_paren(code, callback + 1)
-        tail = re.match(r'\s*(?:async\s*)?\{', code[params_close + 1:])
-        if not tail:
-            continue  # an arrow body is one expression: it cannot hold a guard
-        brace = params_close + 1 + tail.end() - 1
-        handlers.append((head.start(), brace + 1, find_matching_brace(code, brace + 1), True))
+        handlers.append((head.start(), brace + 1, find_matching_brace(code, brace + 1), 'catch block'))
+    for head_re, kind in ((_RE_CATCH_ERROR_HEAD, '.catchError callback'), (_RE_ON_ERROR_HEAD, 'onError callback')):
+        for head in head_re.finditer(code):
+            callback = head.end()
+            while callback < len(code) and code[callback].isspace():
+                callback += 1
+            if callback >= len(code) or code[callback] != '(':
+                continue  # a tear-off or a named handler, not a function literal
+            params_close = find_matching_paren(code, callback + 1)
+            tail = re.match(r'\s*(?:async\s*)?\{', code[params_close + 1:])
+            if not tail:
+                continue  # an arrow body is one expression: it cannot hold a guard
+            brace = params_close + 1 + tail.end() - 1
+            handlers.append((head.start(), brace + 1, find_matching_brace(code, brace + 1), kind))
 
-    for report_pos, body_open, body_close, is_catch_error in handlers:
+    for report_pos, body_open, body_close, kind in handlers:
         first_log = _log_lost_on_back_out(code, body_open, body_close)
         if first_log is None:
             continue
         handler_line = content[:report_pos].count('\n') + 1
         log_line = content[:first_log].count('\n') + 1
-        kind = '.catchError callback' if is_catch_error else 'catch block'
         violations.append(Violation(
             file_path=str(file_path),
             class_name='',
@@ -3761,7 +3778,7 @@ def check_log_after_mounted_guard(
                 f"a failure that lands after a back-out is never recorded"
             ),
             code_snippet=extract_snippet(lines, handler_line, before=0, after=max(4, log_line - handler_line + 1)),
-            fix_instructions=_get_log_after_mounted_guard_fix(is_catch_error),
+            fix_instructions=_get_log_after_mounted_guard_fix(kind),
         ))
     return violations
 

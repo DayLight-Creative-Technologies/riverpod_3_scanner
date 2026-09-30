@@ -116,6 +116,24 @@ class _S extends State<W> {
         assert violation.context.startswith('.catchError callback')
         assert 'try / await / catch' in violation.fix_instructions
 
+    def test_on_error_callback_that_guards_then_logs(self, tmp_path):
+        source = """\
+class _S extends State<W> {
+  void listen(UnifiedLogger logger) {
+    _sub = events.listen(
+      _onEvent,
+      onError: (Object e, StackTrace st) {
+        if (!mounted) return;
+        logger.logError('Stream failed', error: e, stackTrace: st);
+      },
+    );
+  }
+}
+"""
+        (violation,) = _found(tmp_path, source)
+        assert violation.context.startswith('onError callback')
+        assert 'before subscribing' in violation.fix_instructions
+
     def test_a_catch_in_a_plain_state_is_judged(self, tmp_path):
         source = """\
 class _S extends State<W> {
@@ -190,6 +208,30 @@ class TestClean:
 class _S extends State<W> {
   void go(UnifiedLogger logger) {
     work().catchError((e) => logger.logError('Failed', error: e));
+  }
+}
+"""
+        assert _found(tmp_path, source) == []
+
+    def test_an_on_error_callback_that_logs_first(self, tmp_path):
+        source = """\
+class _S extends State<W> {
+  void listen(UnifiedLogger logger) {
+    _sub = events.listen(_onEvent, onError: (Object e) {
+      logger.logError('Stream failed', error: e);
+      if (!mounted) return;
+      setState(() => _failed = true);
+    });
+  }
+}
+"""
+        assert _found(tmp_path, source) == []
+
+    def test_an_on_error_tear_off_is_not_a_literal(self, tmp_path):
+        source = """\
+class _S extends State<W> {
+  void listen() {
+    _sub = events.listen(_onEvent, onError: _onError);
   }
 }
 """
