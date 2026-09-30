@@ -922,6 +922,7 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         # return;` — so it is reached with the host already gone.
         handler_kinds = (
             (re.compile(r'catch\s*\([^)]+\)\s*\{'), ViolationType.MISSING_MOUNTED_IN_CATCH, 'catch block'),
+            (re.compile(r'\}\s*on\s+[A-Za-z_][\w.<>?, ]*?\s*\{'), ViolationType.MISSING_MOUNTED_IN_CATCH, 'catch block'),
             (re.compile(r'\bfinally\s*\{'), ViolationType.MISSING_MOUNTED_IN_FINALLY, 'finally block'),
         )
         for catch_pattern, handler_type, handler_kind in handler_kinds:
@@ -3528,6 +3529,28 @@ _RE_LOG_CALL = re.compile(
     r'\.\s*log(?:Error|Warning|Critical|Info|Debug|Verbose|SubscriptionError|Classified)\s*\('
 )
 _RE_CATCH_HEAD = re.compile(r'\bcatch\s*\(')
+# A catch clause with no binding: `} on TimeoutException {`. It follows the `}`
+# that closes the try (or the previous clause); `extension … on T {` and
+# `mixin … on T {` never do.
+_RE_ON_ONLY_HEAD = re.compile(r'\}\s*on\s+[A-Za-z_][\w.<>?, ]*?\s*\{')
+
+
+def _catch_clause_bodies(code: str) -> List[Tuple[int, int, int]]:
+    """(report_pos, body_open, body_close) of every catch clause in ``code``:
+    `catch (e) {`, `on T catch (e) {` and the binding-less `on T {`."""
+    bodies: List[Tuple[int, int, int]] = []
+    for head in _RE_CATCH_HEAD.finditer(code):
+        params_close = find_matching_paren(code, head.end())
+        brace = params_close + 1
+        while brace < len(code) and code[brace].isspace():
+            brace += 1
+        if brace >= len(code) or code[brace] != '{':
+            continue
+        bodies.append((head.start(), brace + 1, find_matching_brace(code, brace + 1)))
+    for head in _RE_ON_ONLY_HEAD.finditer(code):
+        on_pos = code.index('on', head.start())
+        bodies.append((on_pos, head.end(), find_matching_brace(code, head.end())))
+    return sorted(bodies)
 _RE_CATCH_ERROR_HEAD = re.compile(r'\.\s*catchError\s*\(')
 # A named error callback: `stream.listen(…, onError: (e, st) { … })`, `.then(…, onError: …)`.
 _RE_ON_ERROR_HEAD = re.compile(r'\bonError\s*:\s*')
@@ -3751,15 +3774,9 @@ def check_log_after_mounted_guard(
     violations: List[Violation] = []
     code = blank_string_literals(remove_comments(content))
 
-    handlers: List[Tuple[int, int, int, str]] = []  # (report_pos, body_open, body_close, kind)
-    for head in _RE_CATCH_HEAD.finditer(code):
-        params_close = find_matching_paren(code, head.end())
-        brace = params_close + 1
-        while brace < len(code) and code[brace].isspace():
-            brace += 1
-        if brace >= len(code) or code[brace] != '{':
-            continue
-        handlers.append((head.start(), brace + 1, find_matching_brace(code, brace + 1), 'catch block'))
+    handlers: List[Tuple[int, int, int, str]] = [  # (report_pos, body_open, body_close, kind)
+        (head, body_open, body_close, 'catch block') for head, body_open, body_close in _catch_clause_bodies(code)
+    ]
     for head_re, kind in ((_RE_CATCH_ERROR_HEAD, '.catchError callback'), (_RE_ON_ERROR_HEAD, 'onError callback')):
         for head in head_re.finditer(code):
             callback = head.end()
@@ -3839,22 +3856,14 @@ def check_catch_guard_returns_success(
     """
     violations: List[Violation] = []
     code = blank_string_literals(remove_comments(content))
-    for head in _RE_CATCH_HEAD.finditer(code):
-        params_close = find_matching_paren(code, head.end())
-        brace = params_close + 1
-        while brace < len(code) and code[brace].isspace():
-            brace += 1
-        if brace >= len(code) or code[brace] != '{':
-            continue
-        body_open = brace + 1
-        body_close = find_matching_brace(code, body_open)
+    for head_pos, body_open, body_close in _catch_clause_bodies(code):
         body = code[body_open:body_close]
         guard = next((g for g in _RE_GUARD_RETURN.finditer(body) if _RE_SUCCESS_VALUE.fullmatch(g.group(1))), None)
         if guard is None:
             continue
         if not any(_RE_FAILURE_VALUE.fullmatch(r.group(1)) for r in _RE_RETURN_VALUE.finditer(body)):
             continue
-        handler_line = content[:head.start()].count('\n') + 1
+        handler_line = content[:head_pos].count('\n') + 1
         guard_line = content[:body_open + guard.start()].count('\n') + 1
         violations.append(Violation(
             file_path=str(file_path),

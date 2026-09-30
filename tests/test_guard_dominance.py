@@ -42,6 +42,34 @@ def test_a_guard_after_the_use_does_not_protect_it():
     assert _danger("ref.read(p);\nif (!ref.mounted) return;") == 'ref.read'
 
 
+def test_a_binding_less_on_clause_is_judged_like_a_catch(tmp_path):
+    source = """\
+import 'package:riverpod_annotation/riverpod_annotation.dart';
+
+part 'probe.g.dart';
+
+@riverpod
+class Probe extends _$Probe {
+  @override
+  int build() => 0;
+
+  Future<void> run() async {
+    if (!ref.mounted) return;
+    try {
+      await work();
+      if (!ref.mounted) return;
+    } on TimeoutException {
+      state = -1;
+    }
+  }
+}
+"""
+    f = tmp_path / "probe.dart"
+    f.write_text(source)
+    found = [v for v in RiverpodScanner().scan_file(f) if v.violation_type == ViolationType.MISSING_MOUNTED_IN_CATCH]
+    assert len(found) == 1
+
+
 def test_catch_block_with_a_nested_guard_is_flagged_end_to_end(tmp_path):
     source = """\
 import 'package:riverpod_annotation/riverpod_annotation.dart';

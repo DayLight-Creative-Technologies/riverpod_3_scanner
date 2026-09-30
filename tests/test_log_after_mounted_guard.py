@@ -96,6 +96,10 @@ class TestFlagged:
         source = _wrap("      scheduleRetry(onGiveUp: (reason) {\n        logger.logWarning('Gave up: $reason');\n      });\n      if (!mounted) return;\n      logger.logError('Failed', error: e);")
         assert len(_found(tmp_path, source)) == 1
 
+    def test_a_binding_less_on_clause(self, tmp_path):
+        source = _wrap("      if (!mounted) return;\n      logger.logWarning('Timed out');", head="on TimeoutException")
+        assert len(_found(tmp_path, source)) == 1
+
     def test_every_log_level_counts(self, tmp_path):
         for level in ('Error', 'Warning', 'Critical', 'Info', 'Debug', 'Verbose'):
             source = _wrap(f"      if (!mounted) return;\n      logger.log{level}('Failed');")
@@ -222,6 +226,24 @@ class _S extends State<W> {
       if (!mounted) return;
       setState(() => _failed = true);
     });
+  }
+}
+"""
+        assert _found(tmp_path, source) == []
+
+    def test_extension_and_mixin_on_clauses_are_not_handlers(self, tmp_path):
+        source = """\
+extension Tools on Widget {
+  void go(UnifiedLogger logger) {
+    if (!mounted) return;
+    logger.logInfo('x');
+  }
+}
+
+mixin Helper on State<W> {
+  void go(UnifiedLogger logger) {
+    if (!mounted) return;
+    logger.logInfo('x');
   }
 }
 """
