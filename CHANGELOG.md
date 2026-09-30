@@ -5,6 +5,20 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.2] - 2026-09-30
+
+### Fixed
+
+- **`ref_in_lifecycle_callback` (VIOLATION 8) judges exactly where Riverpod asserts.** riverpod 3.x raises "Cannot use Ref or modify other providers inside life-cycles/selectors" only while `_debugCallbackStack > 0` — inside the callbacks `_runCallbacks` runs (`onDispose`, `onCancel`, `onResume`, `onAddListener`, `onRemoveListener`) and inside `select` / `selectAsync` selectors. The rule:
+  - no longer flags `ref` use inside a `ref.listen` **listener** — that is legal, does not assert (verified in riverpod 3.4.3 source and a debug-mode probe), and the subscription is closed on dispose; the old fix text claimed an AssertionError that never occurs;
+  - now flags `onCancel`, `onResume`, `onAddListener` and `onRemoveListener`, which assert identically to `onDispose` but were never checked (direct and indirect uses);
+  - now flags direct `ref` use inside a `select` / `selectAsync` selector.
+  Found by SocialScoreKeeper gap #835. No finding changes on SocialScoreKeeper's tree (0 before and after).
+
+### Tests
+
+647 (was 637). New: `test_ref_in_lifecycle_callbacks.py` (10) — the first tests to pin this rule's `ref.listen` behaviour in either direction; restoring the old onDispose-only or ref.listen targeting fails them.
+
 ## [1.15.1] - 2026-09-30
 
 ### Fixed

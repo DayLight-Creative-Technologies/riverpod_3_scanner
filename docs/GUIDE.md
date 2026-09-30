@@ -85,7 +85,7 @@ The authoritative list is `ViolationType` / `VIOLATION_SEVERITY` in
 | `missing_mounted_in_catch` | A `ref` / `state` use in a catch block before its mounted guard (judged over the whole catch body) | Production crash |
 | `missing_mounted_in_finally` | A `ref` / `state` use in a finally block before a mounted guard — finally runs after every early `if (!ref.mounted) return;` in its try | Production crash |
 | `nullable_field_access` | Direct `_field?.method()` when a getter exists | Bypasses safety |
-| `ref_in_lifecycle_callback` | `ref.read()` in `ref.onDispose` / `ref.listen` callbacks | AssertionError crash |
+| `ref_in_lifecycle_callback` | `ref` use (direct, or through a method that uses it) in `ref.onDispose` / `onCancel` / `onResume` / `onAddListener` / `onRemoveListener`, or inside a `select` / `selectAsync` selector — exactly where Riverpod asserts. Reading `ref` in a `ref.listen` listener is legal and not flagged | AssertionError: "Cannot use Ref or modify other providers inside life-cycles/selectors" |
 | `ref_listen_outside_build` | `ref.listen` called outside `build()` | Listener leak / crash |
 | `initstate_field_access_before_caching` | Accessing cached fields in `initState` before `build()` caches them | Production crash |
 | `sync_method_without_mounted_check` | A sync method with `ref.read()` called from an async context | Production crash |

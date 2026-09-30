@@ -327,12 +327,12 @@ FIX OPTIONS:
 Reference: https://github.com/rrousselGit/riverpod/issues/1879
 Riverpod explicitly forbids ref operations inside lifecycle callbacks."""
     else:
-        return f"""CRITICAL: Cannot call {ref_or_method}() inside ref.onDispose() - it uses ref internally!
+        return f"""CRITICAL: Cannot call {ref_or_method}() inside {callback_type}() - it uses ref internally!
 
 Riverpod Error: "Cannot use Ref or modify other providers inside life-cycles/selectors"
 
 The method {ref_or_method}() contains ref.read/watch/listen operations, which are
-FORBIDDEN inside lifecycle callbacks like ref.onDispose().
+FORBIDDEN inside lifecycle callbacks ({callback_type} and the other _runCallbacks callbacks).
 
 FIX OPTIONS:
 1. Refactor {ref_or_method}() to accept dependencies as parameters:
@@ -1264,10 +1264,22 @@ def check_nullable_field_misuse(ctx: CheckContext) -> List[Violation]:
 # ===========================================================================
 
 def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
-    """Check for VIOLATION 8: ref.read/watch/listen inside lifecycle callbacks.
+    """Check for VIOLATION 8: ref use where Riverpod asserts against it.
 
-    Checks both direct and indirect (same-class and cross-class) violations
-    inside ref.onDispose() and ref.listen() callbacks.
+    riverpod 3.x (`ref.dart` `_throwIfInvalidUsage`) asserts
+    "Cannot use Ref or modify other providers inside life-cycles/selectors"
+    while `_debugCallbackStack > 0`, which is raised ONLY by `_runCallbacks`
+    — the onDispose / onCancel / onResume / onAddListener / onRemoveListener
+    callbacks (`element.dart` runOnDispose and the listener-count transitions)
+    — and by `select` / `selectAsync` selectors. Those are judged here: direct
+    ref use in all of them, and indirect (same-class / cross-class method that
+    uses ref) in the lifecycle callbacks.
+
+    A `ref.listen` LISTENER is not among them: it runs through the ordinary
+    listener notification, reading ref there is legal and does not assert
+    (verified against riverpod 3.4.3 and a debug-mode probe, SocialScoreKeeper
+    gap #835), and the subscription is closed when the provider is disposed.
+    Earlier versions flagged it; they no longer do.
     """
     violations: List[Violation] = []
 
@@ -1282,10 +1294,11 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
         r'\bref\.(read|watch|listen|invalidateSelf|invalidate|refresh|notifyListeners|onDispose|onCancel|onResume|onAddListener|onRemoveListener|state)\s*[(\.]'
     )
 
-    # ---- STEP 2: ref.onDispose callbacks ----
-    ondispose_pattern = re.compile(r'ref\.onDispose\s*\(')
+    # ---- STEP 2: lifecycle callbacks run by _runCallbacks ----
+    ondispose_pattern = re.compile(r'ref\.(onDispose|onCancel|onResume|onAddListener|onRemoveListener)\s*\(')
 
     for ondispose_match in ondispose_pattern.finditer(stripped_class_content):
+        callback_name = f"ref.{ondispose_match.group(1)}"
         callback_start = ondispose_match.end()
         callback_end = _find_callback_end(stripped_class_content, callback_start)
         callback_content = stripped_class_content[callback_start:callback_end]
@@ -1311,9 +1324,9 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
                 class_name=ctx.class_name,
                 violation_type=ViolationType.REF_IN_LIFECYCLE_CALLBACK,
                 line_number=abs_line,
-                context=f"DIRECT: ref.{ref_op}() called inside ref.onDispose() callback",
+                context=f"DIRECT: ref.{ref_op}() called inside {callback_name}() callback",
                 code_snippet=snippet,
-                fix_instructions=_get_ref_in_lifecycle_fix(ref_op, is_direct=True),
+                fix_instructions=_get_ref_in_lifecycle_fix(ref_op, is_direct=True, callback_type=callback_name),
             ))
 
         # CHECK B: Indirect violations - same class
@@ -1335,9 +1348,9 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
                     class_name=ctx.class_name,
                     violation_type=ViolationType.REF_IN_LIFECYCLE_CALLBACK,
                     line_number=abs_line,
-                    context=f"INDIRECT (same class): {method_name}() called inside ref.onDispose() - method uses ref internally",
+                    context=f"INDIRECT (same class): {method_name}() called inside {callback_name}() - method uses ref internally",
                     code_snippet=snippet,
-                    fix_instructions=_get_ref_in_lifecycle_fix(method_name, is_direct=False),
+                    fix_instructions=_get_ref_in_lifecycle_fix(method_name, is_direct=False, callback_type=callback_name),
                 ))
 
         # CHECK C: Indirect violations - cross-class
@@ -1377,13 +1390,13 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
                         class_name=ctx.class_name,
                         violation_type=ViolationType.REF_IN_LIFECYCLE_CALLBACK,
                         line_number=abs_line,
-                        context=f"INDIRECT (cross-class): {variable_name}.{method_name}() called inside ref.onDispose() - {target_class}.{method_name}() uses ref internally (defined in {target_file})",
+                        context=f"INDIRECT (cross-class): {variable_name}.{method_name}() called inside {callback_name}() - {target_class}.{method_name}() uses ref internally (defined in {target_file})",
                         code_snippet=snippet,
-                        fix_instructions=_get_ref_in_lifecycle_fix(f"{target_class}.{method_name}", is_direct=False, is_cross_class=True),
+                        fix_instructions=_get_ref_in_lifecycle_fix(f"{target_class}.{method_name}", is_direct=False, is_cross_class=True, callback_type=callback_name),
                     ))
 
-    # ---- STEP 3: ref.listen callbacks ----
-    listen_pattern = re.compile(r'ref\.listen\s*\(')
+    # ---- STEP 3: select / selectAsync selectors ----
+    listen_pattern = re.compile(r'\.(?:select|selectAsync)\s*\(')
 
     for listen_match in listen_pattern.finditer(stripped_class_content):
         callback_search_start = listen_match.end()
@@ -1433,9 +1446,9 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
                 class_name=ctx.class_name,
                 violation_type=ViolationType.REF_IN_LIFECYCLE_CALLBACK,
                 line_number=abs_line,
-                context=f"DIRECT: ref.{ref_op}() called inside ref.listen() callback",
+                context=f"DIRECT: ref.{ref_op}() called inside a select() selector",
                 code_snippet=snippet,
-                fix_instructions=_get_ref_in_lifecycle_fix(ref_op, is_direct=True, callback_type="ref.listen"),
+                fix_instructions=_get_ref_in_lifecycle_fix(ref_op, is_direct=True, callback_type="select"),
             ))
 
     return violations
