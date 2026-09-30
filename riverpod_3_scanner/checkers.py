@@ -3730,6 +3730,18 @@ def _log_lost_on_back_out(code: str, start: int, end: int) -> Optional[int]:
 
 def _get_log_after_mounted_guard_fix(kind: str) -> str:
     """Fix instructions for a failure handler that logs only after its guard."""
+    if kind == 'failure branch':
+        return """This failure branch opens with a mounted guard that protects nothing but a
+logger read, so a failure that lands after a back-out is never recorded.
+Capture the logger while mounted (before the await) and log FIRST; drop the
+guard unless something after it touches ref / context / state:
+
+   if (!ref.mounted) return null;
+   final logger = ref.read(unifiedLoggerProvider);   // capture while mounted
+   final response = await load(id);
+   if (response == null) {
+     logger.logError('Failed to load $id');          // log FIRST, no guard
+   }"""
     if kind == 'onError callback':
         return """This onError callback logs only after its mounted guard, so an error that
 arrives after the host is gone is never recorded. Capture the logger while
@@ -3842,7 +3854,78 @@ def check_log_after_mounted_guard(
             code_snippet=extract_snippet(lines, handler_line, before=0, after=max(4, log_line - handler_line + 1)),
             fix_instructions=_get_log_after_mounted_guard_fix(kind),
         ))
+
+    # A failure branch outside any handler: `if (response == null) { if
+    # (!ref.mounted) return; final logger = ref.read(unifiedLoggerProvider);
+    # logger.logError(…); }`. The guard opens the branch and protects nothing
+    # but a logger read, so the failure is dropped whenever the host is gone.
+    handler_spans = [(body_open, body_close) for _, body_open, body_close, _ in handlers]
+    for guard in _RE_EXITING_HOST_GUARD.finditer(code):
+        if any(s <= guard.start() < e for s, e in handler_spans):
+            continue  # judged as part of its handler above
+        branch_start, branch_end = _branch_span(code, guard.end())
+        if not _guard_branch_exits(code, branch_start, branch_end):
+            continue
+        if not _opens_if_or_else_branch(code, guard.start()):
+            continue
+        rest_end = _enclosing_block_end(code, guard.start(), len(code))
+        rest = code[branch_end:rest_end]
+        failure_log = _RE_FAILURE_LOG_CALL.search(rest)
+        if failure_log is None or not _RE_LOGGER_READ.search(rest):
+            continue
+        if _RE_HOST_BOUND_USE.search(_RE_LOGGER_READ.sub(' ', rest)):
+            continue  # the guard also protects real host work
+        guard_line = content[:guard.start()].count('\n') + 1
+        log_line = content[:branch_end + failure_log.start()].count('\n') + 1
+        violations.append(Violation(
+            file_path=str(file_path),
+            class_name='',
+            violation_type=ViolationType.LOG_AFTER_MOUNTED_GUARD,
+            line_number=guard_line,
+            context=(
+                f"failure branch guards only to read the logger (log at line {log_line}): "
+                f"a failure that lands after a back-out is never recorded"
+            ),
+            code_snippet=extract_snippet(lines, guard_line, before=1, after=max(3, log_line - guard_line + 1)),
+            fix_instructions=_get_log_after_mounted_guard_fix('failure branch'),
+        ))
     return violations
+
+
+_RE_EXITING_HOST_GUARD = re.compile(r'\bif\s*\(\s*!\s*(?:ref\s*\.\s*)?mounted\s*\)')
+_RE_LOGGER_READ = re.compile(r'ref\s*\.\s*read\s*\(\s*unifiedLoggerProvider\s*\)')
+_RE_FAILURE_LOG_CALL = re.compile(r'\.\s*log(?:Error|Warning)\s*\(')
+_RE_HOST_BOUND_USE = re.compile(
+    r'(?<![\w$])ref\s*\.\s*(?!mounted\b)\w+|(?<![\w$.])(?:state|setState|context|Navigator)\b'
+)
+
+
+def _opens_if_or_else_branch(code: str, pos: int) -> bool:
+    """True when the statement at ``pos`` is the first one in the block of an
+    ``if (…) {`` or ``else {`` — a branch, not a function body's entry."""
+    k = pos - 1
+    while k >= 0 and code[k].isspace():
+        k -= 1
+    if k < 0 or code[k] != '{':
+        return False
+    j = k - 1
+    while j >= 0 and code[j].isspace():
+        j -= 1
+    if j < 0:
+        return False
+    if code[j] == ')':
+        depth = 0
+        m = j
+        while m >= 0:
+            if code[m] == ')':
+                depth += 1
+            elif code[m] == '(':
+                depth -= 1
+                if depth == 0:
+                    break
+            m -= 1
+        return bool(re.search(r'(?<![\w$])if\s*$', code[:max(m, 0)]))
+    return bool(re.search(r'(?<![\w$])else$', code[:j + 1]))
 
 
 # ===========================================================================
