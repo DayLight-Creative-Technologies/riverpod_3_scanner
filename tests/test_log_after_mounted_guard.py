@@ -181,44 +181,6 @@ class AthletesService extends _$AthletesService {
         assert violation.context.startswith('onDone callback')
         assert 'before subscribing' in violation.fix_instructions
 
-    def test_async_value_error_arm_that_guards_then_logs(self, tmp_path):
-        source = """\
-class Scorekeeper extends _$Scorekeeper {
-  ScoreboardState build() {
-    return ref.watch(gameProvider).when(
-      data: (game) => ScoreboardState.from(game),
-      loading: () => ScoreboardState.initial(),
-      error: (error, stackTrace) {
-        if (!ref.mounted) return ScoreboardState.initial();
-        final logger = ref.read(unifiedLoggerProvider);
-        logger.logError('Error fetching game', error: error, stackTrace: stackTrace);
-        return ScoreboardState.initial();
-      },
-    );
-  }
-}
-"""
-        (violation,) = _found(tmp_path, source)
-        assert violation.context.startswith('error callback')
-        assert 'capture' in violation.fix_instructions
-
-    def test_async_error_arm_that_guards_then_logs(self, tmp_path):
-        source = """\
-class Prefs extends _$Prefs {
-  Future<void> update() async {
-    await userState.when(
-      loaded: (user, _) async {},
-      error: (message, _, _) async {
-        if (!ref.mounted) return;
-        final logger = ref.read(unifiedLoggerProvider);
-        logger.logWarning('Cannot update preferences - user in error state');
-      },
-    );
-  }
-}
-"""
-        assert len(_found(tmp_path, source)) == 1
-
 
 class TestClean:
     def test_log_first_then_guard(self, tmp_path):
@@ -331,6 +293,28 @@ class _S extends State<W> {
       if (!mounted) return;
       setState(() => _sub = null);
     });
+  }
+}
+"""
+        assert _found(tmp_path, source) == []
+
+    def test_a_synchronous_error_arm_is_not_judged(self, tmp_path):
+        # AsyncValue.when calls the arm synchronously, right after the guard that
+        # precedes it: the arm's own guard is dead code and nothing is lost —
+        # the reason .fold callbacks are not judged either.
+        source = """\
+class Scorekeeper extends _$Scorekeeper {
+  ScoreboardState build() {
+    return ref.watch(gameProvider).when(
+      data: (game) => ScoreboardState.from(game),
+      loading: () => ScoreboardState.initial(),
+      error: (error, stackTrace) {
+        if (!ref.mounted) return ScoreboardState.initial();
+        final logger = ref.read(unifiedLoggerProvider);
+        logger.logError('Error fetching game', error: error, stackTrace: stackTrace);
+        return ScoreboardState.initial();
+      },
+    );
   }
 }
 """

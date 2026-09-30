@@ -3591,10 +3591,6 @@ _RE_ON_ERROR_HEAD = re.compile(r'\bonError\s*:\s*')
 # subscription that should live as long as its host, an unexpected close IS the
 # failure, and its log is the only record of it.
 _RE_ON_DONE_HEAD = re.compile(r'\bonDone\s*:\s*')
-# An error arm: `AsyncValue.when(error: (e, st) { … })`, a union's `error:` variant.
-# Only a function literal is judged, so `logError('x', error: e)` — a named
-# argument, not a callback — never matches.
-_RE_ERROR_ARM_HEAD = re.compile(r'(?<![\w.$])error\s*:\s*')
 # `mounted` / `ref.mounted` / `context.mounted` / `state.context.mounted`, and
 # RoutePresence's `isOnActiveRoute` — every one is false once the host is gone.
 _RE_PRESENCE_TERM = r'\s*(?:[A-Za-z_]\w*\s*\.\s*)*(?:mounted|isOnActiveRoute)\s*'
@@ -3781,22 +3777,6 @@ ref / context / state:
        // ... resubscribe
      },
    );"""
-    if kind == 'error callback':
-        return """This error callback logs only after its mounted guard, so an error that
-arrives after the host is gone is never recorded. Capture the logger while
-mounted (before the call that takes the callback) and log FIRST, then guard
-before anything that touches ref / context / state:
-
-   final logger = ref.read(unifiedLoggerProvider);   // capture while mounted
-   return value.when(
-     data: onData,
-     loading: onLoading,
-     error: (e, st) {
-       logger.logError('Load failed', error: e, stackTrace: st);   // log FIRST
-       if (!ref.mounted) return fallback;                          // THEN guard
-       return fallback;
-     },
-   );"""
     if kind == '.catchError callback':
         return """This .catchError callback logs only after its mounted guard, so a failure
 that lands after a back-out is never recorded. A .catchError callback must guard
@@ -3845,7 +3825,7 @@ def check_log_after_mounted_guard(
     ``logger.logError(...)`` drops every failure that lands after a back-out.
 
     Flags a ``catch`` block, or a block-bodied ``.catchError`` / ``onError:`` /
-    ``onDone:`` / ``error:`` callback, that
+    ``onDone:`` callback, that
     contains at least one log call and in which EVERY log call runs only while
     mounted (see :func:`_log_lost_on_back_out`). A handler with no log call is
     not this rule's concern; one that logs anything before its guard has
@@ -3867,7 +3847,6 @@ def check_log_after_mounted_guard(
         (_RE_CATCH_ERROR_HEAD, '.catchError callback'),
         (_RE_ON_ERROR_HEAD, 'onError callback'),
         (_RE_ON_DONE_HEAD, 'onDone callback'),
-        (_RE_ERROR_ARM_HEAD, 'error callback'),
     ):
         for head in head_re.finditer(code):
             callback = head.end()
