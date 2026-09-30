@@ -38,6 +38,18 @@ def test_the_first_unguarded_use_is_reported_even_after_a_guarded_one():
     assert _danger(code) == 'state ='
 
 
+def test_a_use_inside_the_negated_guards_own_branch_is_unguarded():
+    # The branch runs precisely when the host is gone (invite_notifier.dart shape).
+    assert _danger("if (!ref.mounted) {\n  state = x;\n  return;\n}") == 'state ='
+
+
+def test_a_positive_check_protects_only_its_own_branch():
+    positive = re.compile(r'if\s*\(\s*!?\s*ref\.mounted\s*\)')
+    assert _leftmost_unguarded_danger("if (ref.mounted) {\n  ref.read(p);\n}", _CATCH_DANGER_PATTERNS, positive) is None
+    inverted = _leftmost_unguarded_danger("if (ref.mounted) return;\nref.read(p);", _CATCH_DANGER_PATTERNS, positive)
+    assert inverted is not None and inverted.group(0) == 'ref.read'
+
+
 def test_a_guard_after_the_use_does_not_protect_it():
     assert _danger("ref.read(p);\nif (!ref.mounted) return;") == 'ref.read'
 

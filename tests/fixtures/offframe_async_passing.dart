@@ -158,7 +158,7 @@ class GoodCompoundGuards extends ConsumerWidget {
     });
 
     Future.microtask(() async {
-      if (mounted && context.mounted) return; // compound `&&` plus `(prefix.)mounted`
+      if (!mounted || !context.mounted) return; // compound `||` plus `(prefix.)mounted`
       ref.read(myProvider.notifier).pulse();
     });
 

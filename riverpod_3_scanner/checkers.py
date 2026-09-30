@@ -123,6 +123,29 @@ def _leftmost_unguarded_danger(
     """
     guard_blocks: List[Tuple[int, int]] = []
     for guard in guard_pattern.finditer(content):
+        # The guard's own then-branch runs precisely when the host is gone: it
+        # protects only what comes AFTER it. `if (!ref.mounted) { state = x; }`
+        # is a use on a disposed host, not a guarded one.
+        protected_from = guard.end()
+        if content[guard.end() - 1:guard.end()] != ')':
+            # The pattern stopped inside the condition: find where it closes.
+            cond_close = find_matching_paren(content, guard.end())
+            protected_from = cond_close + 1 if cond_close < len(content) else guard.end()
+        branch = protected_from
+        while branch < len(content) and content[branch].isspace():
+            branch += 1
+        branch_end = protected_from
+        if branch < len(content):
+            if content[branch] == '{':
+                branch_end = find_matching_brace(content, branch + 1) + 1
+            else:
+                branch_end = find_statement_end(content, branch) + 1
+        if '!' not in guard.group(0):
+            # A POSITIVE check (`if (mounted) { … }`) protects its own branch
+            # and nothing after it.
+            guard_blocks.append((branch - 1, branch_end))
+            continue
+        protected_from = branch_end
         block_end = len(content)
         depth = 0
         for k in range(guard.start() - 1, -1, -1):
@@ -133,7 +156,7 @@ def _leftmost_unguarded_danger(
                     block_end = find_matching_brace(content, k + 1)
                     break
                 depth -= 1
-        guard_blocks.append((guard.start(), block_end))
+        guard_blocks.append((protected_from - 1, block_end))
 
     dangers = sorted(
         (found for pattern in danger_patterns for found in pattern.finditer(content)),
