@@ -3764,3 +3764,79 @@ def check_log_after_mounted_guard(
             fix_instructions=_get_log_after_mounted_guard_fix(is_catch_error),
         ))
     return violations
+
+
+# ===========================================================================
+# CHECKER 16: check_catch_guard_returns_success (VIOLATION 17)
+# ===========================================================================
+
+_RE_GUARD_RETURN = re.compile(
+    r'\bif\s*\(\s*!' + _RE_PRESENCE_TERM + r'\)\s*(?:\{\s*)?return\s+([^;]+);'
+)
+_RE_RETURN_VALUE = re.compile(r'\breturn\s+([^;]+);')
+_RE_SUCCESS_VALUE = re.compile(r'\s*(?:const\s+)?Right\s*[(<].*|\s*true\s*', re.DOTALL)
+_RE_FAILURE_VALUE = re.compile(r'\s*(?:const\s+)?Left\s*[(<].*|\s*false\s*', re.DOTALL)
+
+
+def _get_catch_guard_returns_success_fix() -> str:
+    """Fix instructions for a catch whose mounted guard reports success."""
+    return """This catch reports FAILURE (Left / false) when the host is mounted, but its
+mounted guard returns SUCCESS (Right / true) when the host is gone — so a failed
+operation is reported as a success to whoever awaited it, exactly when nobody is
+watching the screen. The caller is still alive; only this host was disposed.
+
+Return the failure on both paths. Log first through a captured logger; keep a
+guard only if something after it touches ref / context / state:
+
+   } catch (e, st) {
+     logger.logError('Failed', error: e, stackTrace: st);
+     return Left(SomeFailure.unexpected(e.toString()));
+   }"""
+
+
+def check_catch_guard_returns_success(
+    file_path: Path,
+    content: str,
+    lines: List[str],
+) -> List[Violation]:
+    """CHECKER 16: a catch block whose presence guard returns a success value
+    (``Right(...)`` / ``true``) while the same catch otherwise returns a failure
+    value (``Left(...)`` / ``false``) — CATCH_GUARD_RETURNS_SUCCESS.
+
+    ``catch (e) { if (!ref.mounted) return const Right(null); …; return Left(…); }``
+    tells the awaiting caller that a failed write succeeded whenever the host is
+    disposed first. Runs at file scope over every catch; comments and string
+    text are blanked first (length-preserving).
+    """
+    violations: List[Violation] = []
+    code = blank_string_literals(remove_comments(content))
+    for head in _RE_CATCH_HEAD.finditer(code):
+        params_close = find_matching_paren(code, head.end())
+        brace = params_close + 1
+        while brace < len(code) and code[brace].isspace():
+            brace += 1
+        if brace >= len(code) or code[brace] != '{':
+            continue
+        body_open = brace + 1
+        body_close = find_matching_brace(code, body_open)
+        body = code[body_open:body_close]
+        guard = next((g for g in _RE_GUARD_RETURN.finditer(body) if _RE_SUCCESS_VALUE.fullmatch(g.group(1))), None)
+        if guard is None:
+            continue
+        if not any(_RE_FAILURE_VALUE.fullmatch(r.group(1)) for r in _RE_RETURN_VALUE.finditer(body)):
+            continue
+        handler_line = content[:head.start()].count('\n') + 1
+        guard_line = content[:body_open + guard.start()].count('\n') + 1
+        violations.append(Violation(
+            file_path=str(file_path),
+            class_name='',
+            violation_type=ViolationType.CATCH_GUARD_RETURNS_SUCCESS,
+            line_number=handler_line,
+            context=(
+                f"catch block returns a failure, but its mounted guard at line {guard_line} "
+                f"returns {guard.group(1).strip()}: a failure is reported as success on dispose"
+            ),
+            code_snippet=extract_snippet(lines, handler_line, before=0, after=max(4, guard_line - handler_line + 1)),
+            fix_instructions=_get_catch_guard_returns_success_fix(),
+        ))
+    return violations

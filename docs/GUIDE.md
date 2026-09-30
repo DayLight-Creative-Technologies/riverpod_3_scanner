@@ -68,7 +68,7 @@ python3 riverpod_3_scanner.py lib --pattern "**/*_notifier.dart"
 
 ---
 
-## 📊 VIOLATION TYPES (23 TYPES)
+## 📊 VIOLATION TYPES (24 TYPES)
 
 The authoritative list is `ViolationType` / `VIOLATION_SEVERITY` in
 `riverpod_3_scanner/models.py`; the `type` column is the value the scanner prints.
@@ -94,6 +94,7 @@ The authoritative list is `ViolationType` / `VIOLATION_SEVERITY` in
 | `state_assign_await` | `state = await …` with no mounted check between the await and the assignment | Production crash |
 | `async_star_ref_before_mounted` | An `async*` function provider whose first `ref.read/watch/listen` precedes `if (!ref.mounted)` | Production crash |
 | `build_listen_sync_state_mutation` | A `build()`-registered `ref.listen` on a sync provider whose callback mutates `state` synchronously | Build-phase modification crash |
+| `catch_guard_returns_success` | A catch block whose mounted guard returns `Right(...)` / `true` while the catch otherwise returns `Left(...)` / `false` | A failed operation is reported to its live caller as a success |
 
 ### WARNINGS (High risk of crashes, or lost diagnostics)
 

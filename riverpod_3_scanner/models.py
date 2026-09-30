@@ -41,6 +41,7 @@ class ViolationType(Enum):
     ASYNC_STAR_REF_BEFORE_MOUNTED = "async_star_ref_before_mounted"
     BUILD_LISTEN_SYNC_STATE_MUTATION = "build_listen_sync_state_mutation"
     LOG_AFTER_MOUNTED_GUARD = "log_after_mounted_guard"
+    CATCH_GUARD_RETURNS_SUCCESS = "catch_guard_returns_success"
 
 
 VIOLATION_SEVERITY = {
@@ -68,6 +69,8 @@ VIOLATION_SEVERITY = {
     ViolationType.BUILD_LISTEN_SYNC_STATE_MUTATION: Severity.CRITICAL,
     # Loses a failure record rather than crashing.
     ViolationType.LOG_AFTER_MOUNTED_GUARD: Severity.WARNING,
+    # A wrong answer to a live caller, not a crash.
+    ViolationType.CATCH_GUARD_RETURNS_SUCCESS: Severity.CRITICAL,
 }
 
 
