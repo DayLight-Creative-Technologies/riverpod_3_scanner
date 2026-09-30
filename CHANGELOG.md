@@ -5,6 +5,39 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The log-first release: every failure handler records its failure in a way that survives a back-out, and nothing uses a host on the path that exists because the host is gone. Found and proven against SocialScoreKeeper's gap #814 sweep (every catch in `lib/`), gap #825 and gap #821/#822.
+
+### Added
+
+- **`log_after_mounted_guard` (VIOLATION 16, WARNING)** — a failure handler whose failure log runs only once the host is known to be mounted, so a failure that lands after a back-out is never recorded. The fix it asks for: log FIRST through a logger captured while mounted (a captured value stays usable after unmount), THEN guard before anything that touches ref / context / state. Judged shapes:
+  - a `catch` block — including the binding-less `} on T {` clause — or a block-bodied `.catchError` callback, in which every log call is dominated by an exiting negative presence guard (`!mounted`, `!ref.mounted`, `!context.mounted`, `!isOnActiveRoute`, any disjunct of a top-level `||`) or sits inside a positive presence check;
+  - a block-bodied `onError:` callback (`stream.listen(…, onError: (e, st) { … })`);
+  - a **failure branch** outside any handler: an `if` / `else` block that opens with an exiting host guard protecting nothing but a logger read before a `logError` / `logWarning` (42 in SocialScoreKeeper).
+  - Considered and rejected: `.fold` failure callbacks. Every one in SocialScoreKeeper follows a guard with no await between, so the callback's own guard is dead code and nothing is lost; VIOLATION 5 already requires that guard after an await.
+- **`missing_mounted_in_finally` (VIOLATION 6b, CRITICAL)** — a `finally` block runs after every early `if (!ref.mounted) return;` in its try, so it is reached with the host gone; it is now judged like a catch block (gap #821: `MediaQueueManager._processQueue` read `unifiedLoggerProvider` in its `finally`).
+- **`catch_guard_returns_success` (VIOLATION 17, CRITICAL)** — a catch whose presence guard returns `Right(...)` / `true` while the catch otherwise returns `Left(...)` / `false`: a failed operation is reported to its still-live caller as a success whenever the host is disposed first (11 sites in SocialScoreKeeper, e.g. `AuthLocalDataSource.updateAuthEntity`).
+- **`use_in_disposed_branch` (VIOLATION 18, CRITICAL)** — a `ref` / notifier `state` / `setState` / host-`context` use in code that runs only once the host is gone: the branch of `if (!ref.mounted)`, the `else` of `if (ref.mounted)`, the matching ternary operand, or a condition operand evaluated after a host term decides the path (`!ref.mounted && state.x`). Every guard check judged what FOLLOWS a guard, never what is inside its own branch, so `if (!ref.mounted) return state.value ?? fallback;` — which throws `UnmountedRefException` on exactly the path it handles (riverpod 3.4.3 `notifier_provider.dart:81`, `ref.dart:238`) — passed; SocialScoreKeeper shipped 12 (gap #825), all 12 found on the pre-fix tree. Conditions are parsed into an `||`/`&&`/`!` tree over the host's own presence terms (`ref.mounted`, bare / `this.` `mounted`; another receiver's `.mounted` — a dialog or navigator context — is not the host) and evaluated three-valued with the host gone; a branch a nested host check rules out, and code after a nested guard that always exits, cannot run and is skipped. An operand evaluated before any host term (`context.mounted && mounted`) is ordinary code, judged by the post-await and dominance rules.
+- **`deferred_callback_unsafe_ref` covers notifier-built UI callbacks (VIOLATION 15b)** — a closure a notifier hands to a widget (`onPressed`, `onTap`, … from `EVENT_HANDLERS`) runs on a tap, after the notifier may be disposed; every ref / state use in it is now judged like a catch block (gap #822: `RemoteDialogManager`'s dialog buttons).
+
+### Fixed
+
+- **A guard protects only what it can actually protect** — `_leftmost_unguarded_danger`, shared by VIOLATIONS 6, 6b, 10 and 15b:
+  - a guard nested in a conditional block (`if (url != null) { await go(); if (!ref.mounted) return; }`) protects the rest of ITS block, not a later use outside it, and every dangerous use is judged, not just the first;
+  - a negated guard's own then-branch is unguarded (protection starts after it), and a positive check (`if (mounted) { … }`) protects only its own branch — so `if (mounted && x) return; ref.read(…)` is flagged;
+  - a negated guard whose branch falls through (`if (!ref.mounted) { log(); }`) protects nothing after it. The same exit requirement now applies to VIOLATION 5 (`missing_mounted_after_await`), which used to accept the guard's text alone.
+- **Binding-less `} on T {` catch clauses are judged** by VIOLATIONS 6, 16 and 17; they matched only `catch (`, so `try { … } on TimeoutException { … }` was never seen. `extension … on T {` and `mixin … on T {` never match.
+- **`docs/GUIDE.md` lists every violation type** (it said 14 while the scanner reported 21); `tests/test_guide_lists_every_violation_type.py` fails when a type has no row, the heading's count is wrong, or a type has no severity.
+
+### Behavior note for adopters — read this before upgrading
+
+These are new findings on code that was always wrong; a tree green on 1.14.3 will not be green on this release. Measured on SocialScoreKeeper before its sweep: `log_after_mounted_guard` flagged every guard-first catch (644 catch blocks in 203 files followed the old order), plus 42 failure branches; `use_in_disposed_branch` 12; `catch_guard_returns_success` 11+. The `catch_block_passing` fixture modelled the guard-first order the rule now rejects and logs first instead; `offframe_async_passing` used the inverted `if (mounted && x) return;` shape and now uses `if (!mounted || !context.mounted) return;`.
+
+### Tests
+
+617 (was 505). New: `test_use_in_disposed_branch.py` (32, incl. the exit-aware guard fixes; 20/20 mutants killed), `test_failure_branch_log_first.py` (11; 9/9), `test_catch_guard_returns_success.py`, `test_finally_block_mounted.py`, `test_log_after_mounted_guard.py`, `test_catch_block_log_first.py`, `test_notifier_ui_callbacks.py`, `test_guard_dominance.py`, `test_guide_lists_every_violation_type.py`.
+
 ## [1.14.3] - 2026-09-29
 
 ### Fixed
