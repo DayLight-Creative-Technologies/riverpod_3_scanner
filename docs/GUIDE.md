@@ -78,7 +78,7 @@ The authoritative list is `ViolationType` / `VIOLATION_SEVERITY` in
 | Type | Detection | Impact |
 |------|-----------|--------|
 | `field_caching` | Nullable fields with getters in async classes | Production crash on unmount |
-| `lazy_getter` | `get x => ref.read()` in async classes | Production crash on unmount |
+| `lazy_getter` | A getter whose body reads `ref` (arrow or block, incl. a `??= ref.read` cache) in a class with any async code — an `async` method or an `async` closure. A getter that returns a value when `!ref.mounted` is not flagged | Production crash on unmount; hides ref uses from the guard checks |
 | `async_getter` | `Future<T> get x async` with field caching | Production crash on unmount |
 | `ref_read_before_mounted` | ref operations before the entry mounted check | Production crash |
 | `missing_mounted_after_await` | No mounted check after an async gap | Production crash |

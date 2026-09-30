@@ -694,7 +694,73 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
                 ),
             ))
 
+    violations.extend(_ref_reading_getters_in_async_class(ctx, {v.line_number for v in violations}))
     return violations
+
+
+# A function literal or method body that runs asynchronously: `() async {`,
+# `(e) async => …`, `() async* {`. Closures handed to a mutex, a Timer, `.then`
+# or a stream run later, just like an async method does.
+_RE_ASYNC_BODY = re.compile(r'\)\s*async\*?\s*(?:\{|=>)')
+# A getter head: `Type get name =>` / `Type get name {`.
+_RE_GETTER_HEAD = re.compile(r'\bget\s+([A-Za-z_]\w*)\s*(=>|\{)')
+_RE_REF_READ = re.compile(r'\bref\s*\.\s*(?:read|watch)\s*\(')
+_RE_REF_CACHED_FIELD = re.compile(r'\b(_\w+)\s*(?:\?\?)?=\s*ref\s*\.\s*(?:read|watch)\s*\(')
+_RE_RETURNS_FIELD = re.compile(r'\s*(?:return\s+)?(_\w+)\s*!?\s*;?\s*')
+# A getter that answers its own disposal with a value, never a throw:
+# `=> ref.mounted ? ref.read(p) : fallback;` or a body that opens with
+# `if (!ref.mounted) return …;`. It is safe to call after the host is gone.
+_RE_SELF_GUARDED_ARROW = re.compile(r'^\s*ref\s*\.\s*mounted\s*\?')
+_RE_SELF_GUARDED_BLOCK = re.compile(r'^\s*if\s*\(\s*!\s*ref\s*\.\s*mounted\s*\)\s*(?:\{\s*)?return\b')
+
+
+def _ref_reading_getters_in_async_class(ctx: CheckContext, already: Set[int]) -> List[Violation]:
+    """A getter whose body reads ref, in a class with ANY async code.
+
+    The lazy-getter rule used to see only the arrow form
+    (`get x => ref.read(...);`) and only in a class with an `async` METHOD.
+    A block-bodied getter (`get x { if (!ref.mounted) throw …; return
+    ref.read(…); }`) and a class whose async work lives in closures (a mutex's
+    `runExclusive(() async {…})`, a `Timer`, `.then`) slipped through, and the
+    getter hid every ref use behind it from the mounted-guard checks
+    (SocialScoreKeeper gap #833: EventProcessor, CheerServiceInitializer).
+    """
+    code = blank_string_literals(remove_comments(ctx.class_content))
+    if not (ctx.has_async_methods or _RE_ASYNC_BODY.search(code)):
+        return []
+    # Fields the class fills from ref (`_x = ref.read(p);` / `_x ??= ref.read(p);`):
+    # a getter that just returns one is a ref read cached where the guard checks
+    # cannot see it.
+    ref_cached_fields = set(_RE_REF_CACHED_FIELD.findall(code))
+    found: List[Violation] = []
+    for head in _RE_GETTER_HEAD.finditer(code):
+        name, form = head.group(1), head.group(2)
+        if form == '=>':
+            body = code[head.end():find_statement_end(code, head.end()) + 1]
+        else:
+            body = code[head.end():find_matching_brace(code, head.end())]
+        returned = _RE_RETURNS_FIELD.fullmatch(body)
+        if not _RE_REF_READ.search(body) and not (returned and returned.group(1) in ref_cached_fields):
+            continue
+        guarded = _RE_SELF_GUARDED_ARROW if form == '=>' else _RE_SELF_GUARDED_BLOCK
+        if guarded.match(body):
+            continue  # degrades with a value on disposal — nothing throws, nothing is hidden
+        line = ctx.full_content[:ctx.class_start + head.start()].count('\n') + 1
+        if line in already:
+            continue
+        found.append(Violation(
+            file_path=str(ctx.file_path),
+            class_name=ctx.class_name,
+            violation_type=ViolationType.LAZY_GETTER,
+            line_number=line,
+            context=(
+                f"Getter 'get {name}' reads ref in a class with async code: every ref use "
+                f"behind it is invisible to the mounted-guard checks and throws once the host is disposed"
+            ),
+            code_snippet=extract_snippet(ctx.lines, line, before=0, after=4),
+            fix_instructions=_get_lazy_getter_fix(name),
+        ))
+    return found
 
 
 # What is dangerous to touch in a catch block once the host may be disposed:

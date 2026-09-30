@@ -5,6 +5,16 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.1] - 2026-09-30
+
+### Fixed
+
+- **`lazy_getter` (VIOLATION 2) sees every getter that reads `ref`** — it matched only `Type get x => ref.read(...);` and only in a class with an `async` METHOD. A block-bodied getter (`get logger { if (!ref.mounted) throw …; return ref.read(…); }`), a getter that reads `ref` inside an expression, and any class whose async work lives in closures (a mutex's `runExclusive(() async {…})`, a `Timer`, `.then`) slipped through — and a getter hides every ref use behind it from the mounted-guard checks. A getter that answers its own disposal with a value (`ref.mounted ? ref.read(p) : fallback`, or a body opening `if (!ref.mounted) return …;`) is not flagged: nothing throws and nothing is hidden. A getter that only returns a field the class fills from `ref.read` / `ref.watch` (`get router => _router!;`) is the same hidden ref use and is flagged too. Found by SocialScoreKeeper gap #833 (EventProcessor, AutoCheerService, CheerServiceInitializer); 19 more getters in 10 files on first run, all fixed there before release.
+
+### Tests
+
+637 (was 623). New: `test_ref_reading_getters.py` (14).
+
 ## [1.15.0] - 2026-09-30
 
 The log-first release: every failure handler records its failure in a way that survives a back-out, and nothing uses a host on the path that exists because the host is gone. Found and proven against SocialScoreKeeper's gap #814 sweep (every catch in `lib/`), gap #825 and gap #821/#822.
