@@ -161,6 +161,65 @@ class _S extends State<W> {
         assert 'capture it before the try' in advice
 
 
+    def test_on_done_callback_that_guards_then_logs(self, tmp_path):
+        source = """\
+class AthletesService extends _$AthletesService {
+  void subscribe(UnifiedLogger logger) {
+    _sub = events.listen(
+      _onEvent,
+      onDone: () {
+        _sub = null;
+        if (!ref.mounted) return;
+        final logger = ref.read(unifiedLoggerProvider);
+        logger.logWarning('Realtime stream closed');
+      },
+    );
+  }
+}
+"""
+        (violation,) = _found(tmp_path, source)
+        assert violation.context.startswith('onDone callback')
+        assert 'before subscribing' in violation.fix_instructions
+
+    def test_async_value_error_arm_that_guards_then_logs(self, tmp_path):
+        source = """\
+class Scorekeeper extends _$Scorekeeper {
+  ScoreboardState build() {
+    return ref.watch(gameProvider).when(
+      data: (game) => ScoreboardState.from(game),
+      loading: () => ScoreboardState.initial(),
+      error: (error, stackTrace) {
+        if (!ref.mounted) return ScoreboardState.initial();
+        final logger = ref.read(unifiedLoggerProvider);
+        logger.logError('Error fetching game', error: error, stackTrace: stackTrace);
+        return ScoreboardState.initial();
+      },
+    );
+  }
+}
+"""
+        (violation,) = _found(tmp_path, source)
+        assert violation.context.startswith('error callback')
+        assert 'capture' in violation.fix_instructions
+
+    def test_async_error_arm_that_guards_then_logs(self, tmp_path):
+        source = """\
+class Prefs extends _$Prefs {
+  Future<void> update() async {
+    await userState.when(
+      loaded: (user, _) async {},
+      error: (message, _, _) async {
+        if (!ref.mounted) return;
+        final logger = ref.read(unifiedLoggerProvider);
+        logger.logWarning('Cannot update preferences - user in error state');
+      },
+    );
+  }
+}
+"""
+        assert len(_found(tmp_path, source)) == 1
+
+
 class TestClean:
     def test_log_first_then_guard(self, tmp_path):
         assert _found(tmp_path, _wrap("      logger.logError('Failed', error: e);\n      if (!mounted) return;\n      setState(() => _pending = false);")) == []
@@ -261,4 +320,44 @@ class _S extends State<W> {
 
     def test_a_log_before_the_guard_records_the_failure_even_with_more_after(self, tmp_path):
         source = _wrap("      logger.logError('Failed', error: e);\n      if (!mounted) return;\n      logger.logInfo('Showing the failure');")
+        assert _found(tmp_path, source) == []
+
+    def test_an_on_done_callback_that_logs_first(self, tmp_path):
+        source = """\
+class _S extends State<W> {
+  void listen(UnifiedLogger logger) {
+    _sub = events.listen(_onEvent, onDone: () {
+      logger.logWarning('Stream closed');
+      if (!mounted) return;
+      setState(() => _sub = null);
+    });
+  }
+}
+"""
+        assert _found(tmp_path, source) == []
+
+    def test_an_arrow_error_arm_holds_no_guard(self, tmp_path):
+        source = """\
+class Scorekeeper extends _$Scorekeeper {
+  ScoreboardState build() => ref.watch(gameProvider).when(
+        data: ScoreboardState.from,
+        loading: ScoreboardState.initial,
+        error: (e, st) => ScoreboardState.initial(),
+      );
+}
+"""
+        assert _found(tmp_path, source) == []
+
+    def test_an_error_named_argument_is_not_a_handler(self, tmp_path):
+        source = _wrap("      logger.logError('Failed', error: (e as StateError).message);\n      if (!mounted) return;")
+        assert _found(tmp_path, source) == []
+
+    def test_an_on_done_tear_off_is_not_a_literal(self, tmp_path):
+        source = """\
+class _S extends State<W> {
+  void listen() {
+    _sub = events.listen(_onEvent, onDone: _onDone);
+  }
+}
+"""
         assert _found(tmp_path, source) == []

@@ -14,6 +14,8 @@ The log-first release: every failure handler records its failure in a way that s
 - **`log_after_mounted_guard` (VIOLATION 16, WARNING)** — a failure handler whose failure log runs only once the host is known to be mounted, so a failure that lands after a back-out is never recorded. The fix it asks for: log FIRST through a logger captured while mounted (a captured value stays usable after unmount), THEN guard before anything that touches ref / context / state. Judged shapes:
   - a `catch` block — including the binding-less `} on T {` clause — or a block-bodied `.catchError` callback, in which every log call is dominated by an exiting negative presence guard (`!mounted`, `!ref.mounted`, `!context.mounted`, `!isOnActiveRoute`, any disjunct of a top-level `||`) or sits inside a positive presence check;
   - a block-bodied `onError:` callback (`stream.listen(…, onError: (e, st) { … })`);
+  - a block-bodied `onDone:` callback — for a subscription meant to live as long as its host, an unexpected close IS the failure (6 in SocialScoreKeeper, each logging a dead realtime stream only while mounted);
+  - a block-bodied `error:` arm — `AsyncValue.when(error: (e, st) { … })` or a union's `error:` variant (6 in SocialScoreKeeper). A named argument such as `logError('x', error: e)` is not a function literal and is never judged;
   - a **failure branch** outside any handler: an `if` / `else` block that opens with an exiting host guard protecting nothing but a logger read before a `logError` / `logWarning` (42 in SocialScoreKeeper).
   - Considered and rejected: `.fold` failure callbacks. Every one in SocialScoreKeeper follows a guard with no await between, so the callback's own guard is dead code and nothing is lost; VIOLATION 5 already requires that guard after an await.
 - **`missing_mounted_in_finally` (VIOLATION 6b, CRITICAL)** — a `finally` block runs after every early `if (!ref.mounted) return;` in its try, so it is reached with the host gone; it is now judged like a catch block (gap #821: `MediaQueueManager._processQueue` read `unifiedLoggerProvider` in its `finally`).
@@ -36,7 +38,7 @@ These are new findings on code that was always wrong; a tree green on 1.14.3 wil
 
 ### Tests
 
-617 (was 505). New: `test_use_in_disposed_branch.py` (32, incl. the exit-aware guard fixes; 20/20 mutants killed), `test_failure_branch_log_first.py` (11; 9/9), `test_catch_guard_returns_success.py`, `test_finally_block_mounted.py`, `test_log_after_mounted_guard.py`, `test_catch_block_log_first.py`, `test_notifier_ui_callbacks.py`, `test_guard_dominance.py`, `test_guide_lists_every_violation_type.py`.
+624 (was 505). New: `test_use_in_disposed_branch.py` (32, incl. the exit-aware guard fixes; 20/20 mutants killed), `test_failure_branch_log_first.py` (11; 9/9), `test_catch_guard_returns_success.py`, `test_finally_block_mounted.py`, `test_log_after_mounted_guard.py`, `test_catch_block_log_first.py`, `test_notifier_ui_callbacks.py`, `test_guard_dominance.py`, `test_guide_lists_every_violation_type.py`.
 
 ## [1.14.3] - 2026-09-29
 
