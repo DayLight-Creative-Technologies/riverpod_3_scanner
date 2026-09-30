@@ -68,36 +68,48 @@ python3 riverpod_3_scanner.py lib --pattern "**/*_notifier.dart"
 
 ---
 
-## 📊 VIOLATION TYPES (14 TYPES)
+## 📊 VIOLATION TYPES (23 TYPES)
+
+The authoritative list is `ViolationType` / `VIOLATION_SEVERITY` in
+`riverpod_3_scanner/models.py`; the `type` column is the value the scanner prints.
 
 ### CRITICAL (Will crash in production)
 
-| # | Type | Detection | Impact |
-|---|------|-----------|--------|
-| 1 | Field caching | Nullable fields with getters in async classes | Production crash on unmount |
-| 2 | Lazy getters | `get x => ref.read()` in async classes | Production crash on unmount |
-| 3 | Async getters | `Future<T> get x async` with field caching | Production crash on unmount |
-| 4 | ref.read() before mounted | ref operations before mounted check | Production crash |
-| 5 | Missing mounted after await | No mounted check after async gap | Production crash |
-| 6 | Missing mounted in catch | A `ref` / `state` use in a catch block before its mounted guard (judged over the whole catch body) | Production crash |
-| 7 | Nullable field misuse | Direct `_field?.method()` when getter exists | Bypasses safety |
-| 8 | ref in lifecycle callbacks | ref.read() in ref.onDispose/ref.listen | AssertionError crash |
-| 9 | initState field access | Accessing cached fields before build() | Production crash |
-| 10 | Sync methods without mounted | Sync methods with ref.read() called from async | Production crash |
+| Type | Detection | Impact |
+|------|-----------|--------|
+| `field_caching` | Nullable fields with getters in async classes | Production crash on unmount |
+| `lazy_getter` | `get x => ref.read()` in async classes | Production crash on unmount |
+| `async_getter` | `Future<T> get x async` with field caching | Production crash on unmount |
+| `ref_read_before_mounted` | ref operations before the entry mounted check | Production crash |
+| `missing_mounted_after_await` | No mounted check after an async gap | Production crash |
+| `missing_mounted_in_catch` | A `ref` / `state` use in a catch block before its mounted guard (judged over the whole catch body) | Production crash |
+| `missing_mounted_in_finally` | A `ref` / `state` use in a finally block before a mounted guard — finally runs after every early `if (!ref.mounted) return;` in its try | Production crash |
+| `nullable_field_access` | Direct `_field?.method()` when a getter exists | Bypasses safety |
+| `ref_in_lifecycle_callback` | `ref.read()` in `ref.onDispose` / `ref.listen` callbacks | AssertionError crash |
+| `ref_listen_outside_build` | `ref.listen` called outside `build()` | Listener leak / crash |
+| `initstate_field_access_before_caching` | Accessing cached fields in `initState` before `build()` caches them | Production crash |
+| `sync_method_without_mounted_check` | A sync method with `ref.read()` called from an async context | Production crash |
+| `ref_stored_as_field` | `final Ref` / `final WidgetRef` field in a plain class | Crash after the owner disposes |
+| `ref_passed_to_plain_class` | A constructor parameter typed `Ref` / `WidgetRef` in a plain class | Crash after the owner disposes |
+| `state_assign_await` | `state = await …` with no mounted check between the await and the assignment | Production crash |
+| `async_star_ref_before_mounted` | An `async*` function provider whose first `ref.read/watch/listen` precedes `if (!ref.mounted)` | Production crash |
+| `build_listen_sync_state_mutation` | A `build()`-registered `ref.listen` on a sync provider whose callback mutates `state` synchronously | Build-phase modification crash |
 
-### WARNINGS (High risk of crashes)
+### WARNINGS (High risk of crashes, or lost diagnostics)
 
-| # | Type | Detection | Impact |
-|---|------|-----------|--------|
-| 11 | Widget lifecycle unsafe ref | ref in didUpdateWidget, deactivate, reassemble | High crash risk |
-| 12 | Deferred callback unsafe | Timer/Future.delayed without mounted checks | High crash risk |
+| Type | Detection | Impact |
+|------|-----------|--------|
+| `ref_watch_outside_build` | `ref.watch` called outside `build()` | No rebuild / stale value |
+| `widget_lifecycle_unsafe_ref` | ref in `didUpdateWidget`, `deactivate`, `reassemble` | High crash risk |
+| `deferred_callback_unsafe_ref` | `Timer` / `Future.delayed` / microtask callbacks without mounted checks | High crash risk |
+| `log_after_mounted_guard` | A catch block or block-bodied `.catchError` callback whose every log call runs only once the host is known to be mounted | A failure after a back-out is never recorded |
 
 ### DEFENSIVE (Type safety & best practices)
 
-| # | Type | Detection | Impact |
-|---|------|-----------|--------|
-| 13 | Untyped lazy getters | `var` instead of typed getters | Loses type safety |
-| 14 | mounted vs ref.mounted confusion | Using wrong mounted check for class type | Educational |
+| Type | Detection | Impact |
+|------|-----------|--------|
+| `untyped_lazy_getter` | `var` instead of typed getters | Loses type safety |
+| `mounted_vs_ref_mounted_confusion` | Using the wrong mounted check for the class type | Educational |
 
 ---
 
