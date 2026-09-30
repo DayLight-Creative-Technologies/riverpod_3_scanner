@@ -104,7 +104,7 @@ The authoritative list is `ViolationType` / `VIOLATION_SEVERITY` in
 | `ref_watch_outside_build` | `ref.watch` called outside `build()` | No rebuild / stale value |
 | `widget_lifecycle_unsafe_ref` | ref in `didUpdateWidget`, `deactivate`, `reassemble` | High crash risk |
 | `deferred_callback_unsafe_ref` | `Timer` / `Future.delayed` / microtask callbacks without mounted checks, and UI callbacks (`onPressed`, `onTap`, …) a notifier builds that use ref / state before `if (!ref.mounted)` | High crash risk |
-| `log_after_mounted_guard` | A catch block, block-bodied `.catchError` / `onError` callback, or failure branch (an `if`/`else` block that opens with a mounted guard protecting nothing but a logger read) whose failure log runs only once the host is known to be mounted | A failure after a back-out is never recorded |
+| `log_after_mounted_guard` | A catch block, block-bodied `.catchError` / `onError` / `onDone` callback, or failure branch (an `if`/`else` block that opens with a mounted guard protecting nothing but a logger read) whose failure log runs only once the host is known to be mounted | A failure after a back-out is never recorded |
 
 ### DEFENSIVE (Type safety & best practices)
 

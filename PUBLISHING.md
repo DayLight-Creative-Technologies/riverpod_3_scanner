@@ -60,7 +60,7 @@ Semantic versioning: MAJOR.MINOR.PATCH
 
 **This is the #1 most common error.** It means the version you're trying to upload already exists on PyPI. PyPI does not allow overwriting published versions — ever.
 
-**Fix:** Bump the version in all 3 files, rebuild, and upload again.
+**Fix:** Bump `__version__` in `riverpod_3_scanner/__init__.py`, rebuild, and upload again.
 
 **How to check what's already published:**
 ```bash
@@ -69,7 +69,7 @@ pip3 index versions riverpod-3-scanner
 
 ### Error: dist/ contains stale or wrong-version artifacts
 
-If you updated the version in the 3 files but didn't rebuild, `dist/` still has the OLD version's `.whl` and `.tar.gz`. The upload will either fail ("file already exists" for the old version) or succeed uploading the wrong version.
+If you bumped the version but didn't rebuild, `dist/` still has the OLD version's `.whl` and `.tar.gz`. The upload will either fail ("file already exists" for the old version) or succeed uploading the wrong version.
 
 **Fix:** Always clean and rebuild before uploading:
 ```bash
@@ -161,15 +161,15 @@ riverpod-3-scanner --help
 
 ```
 riverpod_3_scanner/
-├── pyproject.toml              # Package config (version lives here)
-├── setup.py                    # Backward compat (version lives here too)
+├── pyproject.toml              # Package config (reads the version from __init__.py)
+├── setup.py                    # Metadata-free shim (no version)
 ├── MANIFEST.in                 # Include non-Python files in sdist
 ├── README.md                   # PyPI landing page
 ├── LICENSE                     # MIT
 ├── CHANGELOG.md                # Version history
 ├── .env                        # PyPI token (not committed to git)
 ├── riverpod_3_scanner/         # Package source
-│   ├── __init__.py            # Version + exports (version lives here too)
+│   ├── __init__.py            # __version__ (the only place it lives) + exports
 │   ├── __main__.py            # python -m support
 │   ├── scanner.py             # Orchestrator
 │   ├── models.py              # Data models
