@@ -42,6 +42,7 @@ class ViolationType(Enum):
     BUILD_LISTEN_SYNC_STATE_MUTATION = "build_listen_sync_state_mutation"
     LOG_AFTER_MOUNTED_GUARD = "log_after_mounted_guard"
     CATCH_GUARD_RETURNS_SUCCESS = "catch_guard_returns_success"
+    USE_IN_DISPOSED_BRANCH = "use_in_disposed_branch"
 
 
 VIOLATION_SEVERITY = {
@@ -71,6 +72,8 @@ VIOLATION_SEVERITY = {
     ViolationType.LOG_AFTER_MOUNTED_GUARD: Severity.WARNING,
     # A wrong answer to a live caller, not a crash.
     ViolationType.CATCH_GUARD_RETURNS_SUCCESS: Severity.CRITICAL,
+    # Throws UnmountedRefException on the very path it handles.
+    ViolationType.USE_IN_DISPOSED_BRANCH: Severity.CRITICAL,
 }
 
 

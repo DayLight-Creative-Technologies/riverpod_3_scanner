@@ -57,6 +57,9 @@ EXPECTED = {
         ("missing_mounted_in_catch", 89),
         ("missing_mounted_in_catch", 106),
         ("missing_mounted_in_catch", 136),
+        # The same catch's `else` of `if (ref.mounted)` runs only once the
+        # notifier is gone; its ref.read throws there (v1.15.0, gap #825).
+        ("use_in_disposed_branch", 140),
         ("missing_mounted_in_catch", 154),
         # `$state` / `${state}` inside a message is a state read (v1.14.1: v1.14.0
         # blanked the `$identifier` shorthand and missed it).

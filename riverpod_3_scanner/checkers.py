@@ -145,6 +145,10 @@ def _leftmost_unguarded_danger(
             # and nothing after it.
             guard_blocks.append((branch - 1, branch_end))
             continue
+        if not _guard_branch_exits(content, branch, branch_end):
+            # `if (!ref.mounted) { log(); }` falls through: what follows still
+            # runs on a disposed host, so it protects nothing.
+            continue
         protected_from = branch_end
         block_end = len(content)
         depth = 0
@@ -911,7 +915,13 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
             remaining_lines = method_lines[await_line_num + 1:await_line_num + 26]
             next_lines_str = '\n'.join(remaining_lines)
 
-            has_mounted_after = re.search(mounted_pattern, next_lines_str)
+            # A guard counts only when its branch exits: `if (!ref.mounted) {
+            # log(); }` falls through to the code it seems to protect.
+            next_code = blank_string_literals(remove_comments(next_lines_str))
+            has_mounted_after = any(
+                _guard_branch_exits(next_code, *_branch_span(next_code, guard.end()))
+                for guard in re.finditer(mounted_pattern, next_code)
+            )
             has_significant = has_significant_code_after_await(next_lines_str)
 
             if has_significant and not has_mounted_after:
@@ -3960,3 +3970,460 @@ notifier was disposed. Read what the closure needs while mounted and pass it in:
 Or guard first: `onPressed: () { if (!ref.mounted) return; ref.read(...); }`.""",
             ))
     return violations
+
+
+# ===========================================================================
+# CHECKER 18: check_use_in_disposed_branch (VIOLATION 18)
+# ===========================================================================
+
+# The HOST's own presence: `ref.mounted` (a notifier's or provider's Ref) or a
+# bare / `this.` `mounted` (State.mounted). `x.mounted` for any other receiver —
+# a dialog or navigator context — says nothing about whether the host's ref,
+# state or context is still usable, so it is not a host term.
+_RE_HOST_PRESENCE = re.compile(r'(?:(ref|this)\s*\.\s*)?mounted')
+_RE_HOST_TERM = re.compile(r'(?<![\w$.])(?:(?:ref|this)\s*\.\s*)?mounted\b(?!\s*\()')
+
+# What a disposed host cannot do. Every `ref.` member but `mounted` throws
+# UnmountedRefException (riverpod ref.dart `_throwIfInvalidUsage`), and so do a
+# notifier's `state` getter and setter (notifier_provider.dart). A State that
+# is gone has no `context` and must not `setState`.
+_RE_DISPOSED_REF_USE = re.compile(r'(?<![\w$])ref\s*\.\s*(?!mounted\b)[A-Za-z_]\w*')
+_RE_DISPOSED_STATE_USE = re.compile(r'(?<![\w$.])(?:this\s*\.\s*)?state\b')
+_RE_DISPOSED_SET_STATE = re.compile(r'(?<![\w$.])setState\s*\(')
+_RE_DISPOSED_CONTEXT_USE = re.compile(r'(?<![\w$.])(?:this\s*\.\s*)?context\b')
+
+# (start, end) spans of a boolean expression tree:
+#   ('or' | 'and', [children], start, end)   ('not', child, start, end)
+#   ('host', kind, start, end)                ('atom', None, start, end)
+_BoolNode = Tuple[str, object, int, int]
+
+
+def _trim_span(code: str, start: int, end: int) -> Tuple[int, int]:
+    while start < end and code[start].isspace():
+        start += 1
+    while end > start and code[end - 1].isspace():
+        end -= 1
+    return start, end
+
+
+def _split_spans(code: str, start: int, end: int, operator: str) -> List[Tuple[int, int]]:
+    """Split ``code[start:end]`` on ``operator`` at bracket depth 0, as spans."""
+    parts: List[Tuple[int, int]] = []
+    depth = 0
+    part_start = start
+    i = start
+    while i < end:
+        ch = code[i]
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+        elif depth == 0 and code.startswith(operator, i):
+            parts.append((part_start, i))
+            i += len(operator)
+            part_start = i
+            continue
+        i += 1
+    parts.append((part_start, end))
+    return parts
+
+
+def _parse_condition(code: str, start: int, end: int) -> _BoolNode:
+    """Parse a Dart boolean expression into an ||/&&/! tree over host terms and
+    opaque atoms. Anything that is not ||, &&, a leading !, grouping parens or
+    a host presence term is an atom."""
+    start, end = _trim_span(code, start, end)
+    for kind, operator in (('or', '||'), ('and', '&&')):
+        parts = _split_spans(code, start, end, operator)
+        if len(parts) > 1:
+            return (kind, [_parse_condition(code, s, e) for s, e in parts], start, end)
+    if start < end and code[start] == '!' and not code.startswith('!=', start):
+        return ('not', _parse_condition(code, start + 1, end), start, end)
+    if start < end and code[start] == '(' and find_matching_paren(code, start + 1) == end - 1:
+        return _parse_condition(code, start + 1, end - 1)
+    host = _RE_HOST_PRESENCE.fullmatch(code[start:end])
+    if host:
+        return ('host', 'ref' if host.group(1) == 'ref' else 'state', start, end)
+    return ('atom', None, start, end)
+
+
+def _host_kinds(node: _BoolNode) -> Set[str]:
+    kind = node[0]
+    if kind == 'host':
+        return {node[1]}
+    if kind == 'not':
+        return _host_kinds(node[1])
+    if kind in ('or', 'and'):
+        return set().union(*(_host_kinds(child) for child in node[1]))
+    return set()
+
+
+def _value_when_disposed(node: _BoolNode) -> Optional[bool]:
+    """The expression's value once the host is gone (every host term false):
+    True / False when that alone decides it, None when other atoms still can."""
+    kind = node[0]
+    if kind == 'host':
+        return False
+    if kind == 'atom':
+        return None
+    if kind == 'not':
+        inner = _value_when_disposed(node[1])
+        return None if inner is None else not inner
+    values = [_value_when_disposed(child) for child in node[1]]
+    decisive, other = (True, False) if kind == 'or' else (False, True)
+    if decisive in values:
+        return decisive
+    return None if None in values else other
+
+
+def _atoms_evaluated_when_disposed(
+    node: _BoolNode, out: List[Tuple[int, int]], host_seen: Optional[List[bool]] = None
+) -> None:
+    """Spans of the atoms a host check leads to evaluating once the host is gone:
+    those AFTER a host term in evaluation order, honouring && / || short-circuits
+    (`!ref.mounted && state.x` reads `state.x` then; `!ref.mounted || state.x`
+    never does). An atom evaluated BEFORE any host term (`context.mounted &&
+    mounted`) is ordinary code, judged by the post-await and dominance rules."""
+    if host_seen is None:
+        host_seen = [False]
+    kind = node[0]
+    if kind == 'host':
+        host_seen[0] = True
+    elif kind == 'atom':
+        if host_seen[0]:
+            out.append((node[2], node[3]))
+    elif kind == 'not':
+        _atoms_evaluated_when_disposed(node[1], out, host_seen)
+    elif kind in ('or', 'and'):
+        for child in node[1]:
+            _atoms_evaluated_when_disposed(child, out, host_seen)
+            if _value_when_disposed(child) is (kind == 'or'):
+                return
+
+
+def _branch_span(code: str, pos: int) -> Tuple[int, int]:
+    """Span of the statement or block starting at the first non-space from ``pos``."""
+    while pos < len(code) and code[pos].isspace():
+        pos += 1
+    if pos >= len(code):
+        return len(code), len(code)
+    if code[pos] == '{':
+        return pos, min(find_matching_brace(code, pos + 1) + 1, len(code))
+    return pos, min(find_statement_end(code, pos) + 1, len(code))
+
+
+def _else_span(code: str, then_end: int) -> Optional[Tuple[int, int]]:
+    """Span of the `else` part (a whole `else if … else …` chain included)
+    following an if-statement's then-branch, or None."""
+    k = then_end
+    while k < len(code) and code[k].isspace():
+        k += 1
+    if not re.match(r'else\b', code[k:k + 5]):
+        return None
+    body = k + 4
+    while body < len(code) and code[body].isspace():
+        body += 1
+    head = re.match(r'if\s*\(', code[body:])
+    if not head:
+        return body, _branch_span(code, body)[1]
+    cond_close = find_matching_paren(code, body + head.end())
+    _, nested_then_end = _branch_span(code, cond_close + 1)
+    nested_else = _else_span(code, nested_then_end)
+    return body, nested_else[1] if nested_else else nested_then_end
+
+
+def _guard_branch_exits(code: str, branch_start: int, branch_end: int) -> bool:
+    """True when the branch leaves its block on every path it can take at its own
+    level (`return` / `throw` / `rethrow` / `continue` / `break`). A statement
+    inside a function body nested in the branch leaves only that function."""
+    text = list(code[branch_start:branch_end])
+    for s, e in _function_body_spans(code, branch_start, branch_end):
+        for k in range(s - branch_start, e - branch_start):
+            if text[k] != '\n':
+                text[k] = ' '
+    return bool(_RE_GUARD_EXITS.search(''.join(text).lstrip('{')))
+
+
+def _enclosing_block_end(code: str, pos: int, limit: int) -> int:
+    depth = 0
+    for k in range(pos - 1, -1, -1):
+        if code[k] == '}':
+            depth += 1
+        elif code[k] == '{':
+            if depth == 0:
+                return min(find_matching_brace(code, k + 1), limit)
+            depth -= 1
+    return limit
+
+
+def _unreachable_when_disposed(code: str, start: int, end: int) -> List[Tuple[int, int]]:
+    """Spans inside ``code[start:end]`` that cannot run once the host is gone: a
+    nested host check's branch that the disposed value rules out, and whatever
+    follows an exiting guard that the disposed value always takes."""
+    spans: List[Tuple[int, int]] = []
+    for head in re.finditer(r'\bif\s*\(', code[start:end]):
+        cond_open = start + head.end()
+        cond_close = find_matching_paren(code, cond_open)
+        if cond_close >= end:
+            continue
+        tree = _parse_condition(code, cond_open, cond_close)
+        if not _host_kinds(tree):
+            continue
+        value = _value_when_disposed(tree)
+        then_start, then_end = _branch_span(code, cond_close + 1)
+        else_part = _else_span(code, then_end)
+        if value is False:
+            spans.append((then_start, then_end))
+        elif value is True:
+            if else_part:
+                spans.append(else_part)
+            if _guard_branch_exits(code, then_start, then_end):
+                statement_end = else_part[1] if else_part else then_end
+                spans.append((statement_end, _enclosing_block_end(code, start + head.start(), end)))
+    return spans
+
+
+_RE_FUNCTION_PARAMS = re.compile(r'\(([^()]*)\)\s*(?:async\*?|sync\*)?\s*(?:=>|\{)')
+
+
+def _declared_in(code: str, start: int, end: int, name: str) -> bool:
+    """True when ``name`` is declared inside the span: a local, or a parameter of
+    a function literal (``(state) => …``, ``(BuildContext context) { … }``).
+    A call argument (``Navigator.of(context)``) is a use, not a declaration."""
+    region = code[start:end]
+    if re.search(rf'\b(?:final|var|const|late)\s+(?:[\w<>?,. ]+\s+)?{name}\s*[=;]', region):
+        return True
+    for params in _RE_FUNCTION_PARAMS.finditer(region):
+        for param in params.group(1).split(','):
+            words = re.findall(r'[A-Za-z_$][\w$]*', param.split('=')[0])
+            if words and words[-1] == name:
+                return True
+    return False
+
+
+def _disposed_uses(
+    code: str, start: int, end: int, kinds: Set[str], skip: List[Tuple[int, int]]
+) -> List['re.Match[str]']:
+    """Host-bound uses in ``code[start:end]`` outside the ``skip`` spans."""
+    patterns: List[Pattern[str]] = [_RE_DISPOSED_REF_USE]
+    if 'ref' in kinds and not _declared_in(code, start, end, 'state'):
+        patterns += [_RE_DISPOSED_STATE_USE, RE_STATE_INTERPOLATION]
+    if 'state' in kinds:
+        patterns.append(_RE_DISPOSED_SET_STATE)
+        if not _declared_in(code, start, end, 'context'):
+            patterns.append(_RE_DISPOSED_CONTEXT_USE)
+    found = []
+    for pattern in patterns:
+        for use in pattern.finditer(code, start, end):
+            if any(s <= use.start() < e for s, e in skip):
+                continue
+            # A named argument label (`copyWith(state: x)`, `show(context: c)`)
+            # is not a use of the identifier.
+            before = code[start:use.start()].rstrip()
+            if re.match(r'\s*:(?!:)', code[use.end():]) and before[-1:] in ('(', ','):
+                continue
+            found.append(use)
+    return sorted(found, key=lambda m: m.start())
+
+
+def _ternary_regions(code: str) -> List[Tuple[int, int, int, int, int]]:
+    """(test_start, test_end, then_end, else_end, report_pos) of every `?:`
+    whose test contains a host presence term. The then-operand is
+    ``code[test_end + 1:then_end]``, the else-operand ``code[then_end + 1:else_end]``."""
+    seen: Set[int] = set()
+    regions = []
+    for term in _RE_HOST_TERM.finditer(code):
+        # Forward from the term, within its own expression, to a ternary `?`.
+        depth = 0
+        i = term.end()
+        question = None
+        while i < len(code):
+            ch = code[i]
+            if ch in '([{':
+                depth += 1
+            elif ch in ')]}':
+                if depth == 0:
+                    break
+                depth -= 1
+            elif depth == 0 and ch in ',;:':
+                break
+            elif depth == 0 and ch == '=' and code[i + 1:i + 2] not in ('=', '>') and code[i - 1:i] not in ('=', '!', '<', '>'):
+                break
+            elif depth == 0 and ch == '?':
+                if code[i + 1:i + 2] in ('?', '.', '['):
+                    i += 2
+                    continue
+                question = i
+                break
+            i += 1
+        if question is None or question in seen:
+            continue
+        seen.add(question)
+        # Backward from the term to where its expression starts.
+        depth = 0
+        k = term.start() - 1
+        while k >= 0:
+            ch = code[k]
+            if ch in ')]}':
+                depth += 1
+            elif ch in '([{':
+                if depth == 0:
+                    break
+                depth -= 1
+            elif depth == 0 and ch in ',;?:':
+                break
+            elif depth == 0 and ch == '=' and code[k + 1:k + 2] not in ('=',) and code[k - 1:k] not in ('=', '!', '<', '>'):
+                break
+            elif depth == 0 and ch == '>' and code[k - 1:k] == '=':
+                break
+            k -= 1
+        test_start = k + 1
+        keyword = re.match(r'\s*(?:return|yield|await)\b', code[test_start:term.start()])
+        if keyword:
+            test_start += keyword.end()
+        # Then-operand: to the matching `:` (nested `? :` pairs counted).
+        depth = 0
+        nested = 0
+        j = question + 1
+        while j < len(code):
+            ch = code[j]
+            if ch in '([{':
+                depth += 1
+            elif ch in ')]}':
+                depth -= 1
+            elif depth == 0 and ch == '?' and code[j + 1:j + 2] not in ('?', '.', '[') and code[j - 1:j] != '?':
+                nested += 1
+            elif depth == 0 and ch == ':':
+                if nested == 0:
+                    break
+                nested -= 1
+            j += 1
+        colon = j
+        # Else-operand: to the end of the enclosing expression.
+        depth = 0
+        m = colon + 1
+        while m < len(code):
+            ch = code[m]
+            if ch in '([{':
+                depth += 1
+            elif ch in ')]}':
+                if depth == 0:
+                    break
+                depth -= 1
+            elif depth == 0 and ch in ',;':
+                break
+            m += 1
+        regions.append((test_start, question, colon, m, term.start()))
+    return regions
+
+
+def check_use_in_disposed_branch(
+    file_path: Path,
+    content: str,
+    lines: List[str],
+) -> List[Violation]:
+    """CHECKER 18: a ref / state / setState / host-context use in code that runs
+    only once the host is gone (USE_IN_DISPOSED_BRANCH).
+
+    ``if (!ref.mounted) return state.value ?? fallback;`` reads ``state`` in the
+    one branch that exists because the notifier is disposed — and the getter
+    throws UnmountedRefException there. The guard checks never look INSIDE a
+    guard's own branch (a guard protects what follows it), so this rule does.
+
+    Every condition that mentions the host's own presence (``ref.mounted``, or
+    ``mounted`` for a State) is parsed into an ||/&&/! tree and evaluated with
+    the host gone. Flagged: a use in a then-branch (or ternary then-operand)
+    that can run then, in an else-branch (else-operand) that can run then, or
+    in a condition operand evaluated then (``!ref.mounted && state.x``).
+    Branches a nested host check rules out, and code after a nested guard that
+    always exits, cannot run and are skipped. A value captured while mounted is
+    the fix: ``final previous = state.value;`` before the await, then
+    ``if (!ref.mounted) return previous;``.
+
+    Runs at file scope over every class and function; comments and string text
+    are blanked first (length-preserving, so positions are original).
+    """
+    violations: List[Violation] = []
+    code = blank_string_literals(remove_comments(content))
+    reported: Set[int] = set()
+
+    def report(guard_pos: int, use: 're.Match[str]', where: str) -> None:
+        if use.start() in reported:
+            return
+        reported.add(use.start())
+        guard_line = content[:guard_pos].count('\n') + 1
+        use_line = content[:use.start()].count('\n') + 1
+        violations.append(Violation(
+            file_path=str(file_path),
+            class_name='',
+            violation_type=ViolationType.USE_IN_DISPOSED_BRANCH,
+            line_number=use_line,
+            context=(
+                f"{use.group(0).strip()} {where} of the mounted check at line {guard_line}, "
+                f"which runs once the host is disposed — it throws there"
+            ),
+            code_snippet=extract_snippet(lines, guard_line, before=0, after=max(2, use_line - guard_line + 1)),
+            fix_instructions=_get_use_in_disposed_branch_fix(),
+        ))
+
+    for head in re.finditer(r'\bif\s*\(', code):
+        cond_open = head.end()
+        cond_close = find_matching_paren(code, cond_open)
+        if cond_close >= len(code):
+            continue
+        tree = _parse_condition(code, cond_open, cond_close)
+        kinds = _host_kinds(tree)
+        if not kinds:
+            continue
+        atoms: List[Tuple[int, int]] = []
+        _atoms_evaluated_when_disposed(tree, atoms)
+        for s, e in atoms:
+            for use in _disposed_uses(code, s, e, kinds, []):
+                report(head.start(), use, 'in the condition')
+        value = _value_when_disposed(tree)
+        then_start, then_end = _branch_span(code, cond_close + 1)
+        branches = []
+        if value is not False:
+            branches.append(((then_start, then_end), 'in the branch'))
+        else_part = _else_span(code, then_end)
+        if else_part and value is not True:
+            branches.append((else_part, 'in the else branch'))
+        for (s, e), where in branches:
+            skip = _unreachable_when_disposed(code, s, e)
+            for use in _disposed_uses(code, s, e, kinds, skip):
+                report(head.start(), use, where)
+
+    for test_start, question, colon, else_end, term_pos in _ternary_regions(code):
+        tree = _parse_condition(code, test_start, question)
+        kinds = _host_kinds(tree)
+        if not kinds:
+            continue
+        value = _value_when_disposed(tree)
+        operands = []
+        if value is not False:
+            operands.append(((question + 1, colon), 'in the then-operand'))
+        if value is not True:
+            operands.append(((colon + 1, else_end), 'in the else-operand'))
+        for (s, e), where in operands:
+            for use in _disposed_uses(code, s, e, kinds, []):
+                report(term_pos, use, where)
+
+    return sorted(violations, key=lambda v: v.line_number)
+
+
+def _get_use_in_disposed_branch_fix() -> str:
+    """Fix instructions for a host-bound use in a disposed-only branch."""
+    return """This code runs exactly when the host is gone, and uses something that only
+exists while it is mounted: every `ref.` member but `mounted`, a notifier's
+`state` (getter AND setter), a State's `setState` / `context`. Each throws there.
+
+Use a value captured while mounted instead:
+
+   final previous = state.value;                    // while mounted
+   final result = await operation();
+   if (!ref.mounted) return previous;               // not state.value
+   state = AsyncData(result);
+
+If nothing honest can be returned once the host is gone, say so in the type
+(`Future<T?>` returning null) and let the caller keep what it has. Log through a
+logger captured before the await, never `ref.read(unifiedLoggerProvider)` here."""

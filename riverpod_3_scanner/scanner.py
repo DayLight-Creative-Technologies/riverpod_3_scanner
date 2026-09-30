@@ -111,6 +111,7 @@ from .checkers import (
     check_log_after_mounted_guard,
     check_catch_guard_returns_success,
     check_notifier_ui_callbacks,
+    check_use_in_disposed_branch,
 )
 from .output import format_violation_text, print_summary_text, format_json
 
@@ -340,6 +341,10 @@ class RiverpodScanner:
         # --- Every catch in the file: a mounted guard that reports success
         #     while the catch otherwise reports failure ---
         violations.extend(check_catch_guard_returns_success(file_path, content, lines))
+
+        # --- Every mounted check in the file: a ref / state / setState /
+        #     context use in code that runs only once the host is gone ---
+        violations.extend(check_use_in_disposed_branch(file_path, content, lines))
 
         # Filter suppressed violations
         suppressed = []

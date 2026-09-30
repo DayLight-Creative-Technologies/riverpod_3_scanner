@@ -68,7 +68,7 @@ python3 riverpod_3_scanner.py lib --pattern "**/*_notifier.dart"
 
 ---
 
-## 📊 VIOLATION TYPES (24 TYPES)
+## 📊 VIOLATION TYPES (25 TYPES)
 
 The authoritative list is `ViolationType` / `VIOLATION_SEVERITY` in
 `riverpod_3_scanner/models.py`; the `type` column is the value the scanner prints.
@@ -95,6 +95,7 @@ The authoritative list is `ViolationType` / `VIOLATION_SEVERITY` in
 | `async_star_ref_before_mounted` | An `async*` function provider whose first `ref.read/watch/listen` precedes `if (!ref.mounted)` | Production crash |
 | `build_listen_sync_state_mutation` | A `build()`-registered `ref.listen` on a sync provider whose callback mutates `state` synchronously | Build-phase modification crash |
 | `catch_guard_returns_success` | A catch block whose mounted guard returns `Right(...)` / `true` while the catch otherwise returns `Left(...)` / `false` | A failed operation is reported to its live caller as a success |
+| `use_in_disposed_branch` | A `ref` / notifier `state` / `setState` / host `context` use in code that runs only once the host is gone: the branch of `if (!ref.mounted)`, the else of `if (ref.mounted)`, the matching ternary operand, or a condition operand like `!ref.mounted && state.x` | Throws on the exact path meant to handle disposal |
 
 ### WARNINGS (High risk of crashes, or lost diagnostics)
 
