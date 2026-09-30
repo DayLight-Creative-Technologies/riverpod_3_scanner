@@ -5,7 +5,7 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.15.0] - 2026-09-30
 
 The log-first release: every failure handler records its failure in a way that survives a back-out, and nothing uses a host on the path that exists because the host is gone. Found and proven against SocialScoreKeeper's gap #814 sweep (every catch in `lib/`), gap #825 and gap #821/#822.
 
