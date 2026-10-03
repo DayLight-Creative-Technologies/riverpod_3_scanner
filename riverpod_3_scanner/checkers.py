@@ -83,7 +83,12 @@ class CheckContext:
 def _find_callback_end(content: str, callback_start: int) -> int:
     """Find the end of a callback function (closure).
 
-    ``callback_start`` points somewhere at or before the opening ``{``.
+    ``callback_start`` points at (or just before) a ``{`` the CALLER has
+    already proven opens the closure body — every caller anchors it in its
+    match pattern (``... async {``, ``addPostFrameCallback(...) {``). It must
+    never be used to *discover* a callback's body from an argument list: the
+    next ``{`` after ``f(`` belongs to whatever follows a tear-off or an arrow
+    closure (gap #879). Use :func:`_function_literal_body` for that.
     Returns position just after the matching ``}``.
     """
     brace_start = content.find('{', callback_start)
@@ -93,6 +98,84 @@ def _find_callback_end(content: str, callback_start: int) -> int:
     # Use string-aware brace matching from utils
     closing = find_matching_brace(content, brace_start + 1)
     return closing + 1 if closing < len(content) else len(content)
+
+
+_RE_FUNCTION_MODIFIER = re.compile(r'(?:async\s*\*?|sync\s*\*)\s*')
+
+
+def _skip_ws(code: str, i: int) -> int:
+    while i < len(code) and code[i].isspace():
+        i += 1
+    return i
+
+
+def _function_literal_body(code: str, arg_start: int) -> Optional[Tuple[int, int]]:
+    """The body span of the function literal passed as a call's first argument.
+
+    ``code`` is a STRUCTURE view — comments and string-literal text blanked
+    (``blank_string_literals(blank_comments(...))``), same length as the source
+    so the returned positions index the source too. ``arg_start`` is the
+    position just after the call's ``(``.
+
+    Only a function literal has a body. The argument is one when it is a
+    parameter list — optionally preceded by type parameters (``<T>(T x)``) —
+    followed by an optional ``async`` / ``async*`` / ``sync*`` and then ``{``
+    (block body: the span inside the braces) or ``=>`` (arrow body: up to the
+    first depth-0 ``,`` or the call's closing ``)``). Anything else — a tear-off
+    (``scheduler.cancelAll``, ``this.dispose``, ``_registry.release<T>``), a
+    parenthesised or cascaded expression (``(_sub..pause()).cancel``), a
+    variable holding a closure — has no body here and returns ``None``: the code
+    it runs lives elsewhere, and nothing written after the call is part of it.
+
+    Gap #879: the lifecycle check used to take "the next ``{`` after
+    ``ref.onDispose(``" as the body, so ``ref.onDispose(scheduler.cancelAll);``
+    claimed the rest of the enclosing method, and an arrow closure claimed
+    everything after its own expression.
+    """
+    n = len(code)
+    i = _skip_ws(code, arg_start)
+    if i < n and code[i] == '<':
+        depth = 0
+        while i < n:
+            if code[i] == '<':
+                depth += 1
+            elif code[i] == '>':
+                depth -= 1
+                if depth == 0:
+                    break
+            elif code[i] in '(){};':
+                return None
+            i += 1
+        i = _skip_ws(code, i + 1)
+    if i >= n or code[i] != '(':
+        return None
+    params_close = find_matching_paren(code, i + 1)
+    if params_close >= n:
+        return None
+    i = _skip_ws(code, params_close + 1)
+    modifier = _RE_FUNCTION_MODIFIER.match(code, i)
+    if modifier:
+        i = modifier.end()
+    if i < n and code[i] == '{':
+        body_end = find_matching_brace(code, i + 1)
+        return (i + 1, body_end)
+    if code.startswith('=>', i):
+        body_start = i + 2
+        depth = 0
+        j = body_start
+        while j < n:
+            c = code[j]
+            if c in '([{':
+                depth += 1
+            elif c in ')]}':
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == ',' and depth == 0:
+                break
+            j += 1
+        return (body_start, j)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1297,10 +1380,17 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
     # ---- STEP 2: lifecycle callbacks run by _runCallbacks ----
     ondispose_pattern = re.compile(r'ref\.(onDispose|onCancel|onResume|onAddListener|onRemoveListener)\s*\(')
 
+    # Strings blanked too, for finding where a callback's body begins and ends
+    # (a `)` or `,` inside a message must not end an arrow body).
+    structure = blank_string_literals(stripped_class_content)
+
     for ondispose_match in ondispose_pattern.finditer(stripped_class_content):
         callback_name = f"ref.{ondispose_match.group(1)}"
-        callback_start = ondispose_match.end()
-        callback_end = _find_callback_end(stripped_class_content, callback_start)
+        body = _function_literal_body(structure, ondispose_match.end())
+        if body is None:
+            # A tear-off or other non-literal argument: no body here (gap #879).
+            continue
+        callback_start, callback_end = body
         callback_content = stripped_class_content[callback_start:callback_end]
 
         # CHECK A: Direct ref operations
@@ -1399,34 +1489,12 @@ def check_ref_in_lifecycle_callbacks(ctx: CheckContext) -> List[Violation]:
     listen_pattern = re.compile(r'\.(?:select|selectAsync)\s*\(')
 
     for listen_match in listen_pattern.finditer(stripped_class_content):
-        callback_search_start = listen_match.end()
-
-        paren_depth = 1
-        i = callback_search_start
-        callback_start = None
-
-        while i < len(stripped_class_content) and paren_depth > 0:
-            if stripped_class_content[i] == '(':
-                paren_depth += 1
-            elif stripped_class_content[i] == ')':
-                paren_depth -= 1
-                if paren_depth == 0:
-                    temp_i = i
-                    while temp_i > callback_search_start:
-                        if stripped_class_content[temp_i] == '{':
-                            callback_start = temp_i + 1
-                            break
-                        temp_i -= 1
-                    break
-            elif stripped_class_content[i] == '{' and paren_depth == 1:
-                callback_start = i + 1
-                break
-            i += 1
-
-        if callback_start is None:
+        # Same extractor as the lifecycle callbacks: a block or arrow selector
+        # has a body; a tear-off (`select(_pickId)`) has none here.
+        body = _function_literal_body(structure, listen_match.end())
+        if body is None:
             continue
-
-        callback_end_pos = _find_callback_end(stripped_class_content, callback_start - 1)
+        callback_start, callback_end_pos = body
         callback_content = stripped_class_content[callback_start:callback_end_pos]
 
         for ref_match in ref_usage_pattern.finditer(callback_content):

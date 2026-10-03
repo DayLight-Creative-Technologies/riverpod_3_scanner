@@ -5,6 +5,17 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.3] - 2026-10-03
+
+### Fixed
+
+- **`ref_in_lifecycle_callback` (VIOLATION 8) no longer treats the rest of the method as a tear-off's body.** The rule found a lifecycle callback's body by taking the first `{` after `ref.onDispose(` without checking that the argument was a function literal. So `ref.onDispose(scheduler.cancelAll);` "owned" everything up to the end of the next block in the enclosing method, and every legitimate `ref.read` / `ref.watch` after it was reported as a ref use inside `onDispose` (4 false findings in SocialScoreKeeper, gap #879). An arrow closure (`ref.onDispose(() => _timer?.cancel())`) had the same problem: its body ran past its own expression into the following code. The body is now found from the argument itself: only a function literal has one, either a parameter list (optionally `<T>`, `async`, `async*`, `sync*`) followed by a `{…}` block or by `=> expr` up to the argument's end. A tear-off (`_timer.cancel`, `this.dispose`, `_registry.release<T>`, `(_sub..pause()).cancel`) or any other non-literal argument has no body, so nothing after it can be flagged. Parentheses, commas and braces inside strings and comments within the argument do not end a body early. This applies to all five asserting callbacks (`onDispose`, `onCancel`, `onResume`, `onAddListener`, `onRemoveListener`).
+- **`select` / `selectAsync` selectors use the same extractor, so arrow selectors are now judged.** `ref.watch(p.select((u) => ref.read(flag) ? u.id : null))` was never checked because the selector scan only looked for a `{`. Block selectors and tear-off selectors behave as before. No finding changes on SocialScoreKeeper's tree (0 before and after).
+
+### Tests
+
+667 (was 647). 20 new in `test_ref_in_lifecycle_callbacks.py`: tear-offs of seven shapes to `onDispose` and a tear-off to each of the five callbacks followed by legitimate ref use (0 findings), block, arrow and `async` arrow closures that use ref (exactly one finding, nothing after them flagged), nested parens/strings/comments in an arrow body, an arrow closure calling a same-class ref method, and an arrow selector. 17 of the 20 fail on 1.15.2; the other 3 pin behaviour that was already correct (a block closure's true positive, braces in strings inside a block closure, a tear-off selector).
+
 ## [1.15.2] - 2026-09-30
 
 ### Fixed
