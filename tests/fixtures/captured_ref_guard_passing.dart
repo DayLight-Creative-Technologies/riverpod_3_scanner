@@ -66,5 +66,32 @@ class GuardedFailures extends _$GuardedFailures {
   }
 }
 
+// =========================================================================
+// Case 3: a USE of the captured Ref (read, listen, onDispose) behind the
+// captured Ref's own guard
+// =========================================================================
+@riverpod
+class GuardedUses extends _$GuardedUses {
+  @override
+  String build() => 'initial';
+
+  Future<void> run(Ref build) async {
+    if (!build.mounted) return;
+    build.onDispose(() {});
+    await fetchRemote();
+    if (!build.mounted) return;
+    build.listen(sourceProvider, (previous, next) {});
+    final cached = build.read(cacheProvider);
+    try {
+      await fetchRemote();
+      if (!build.mounted) return;
+      state = cached;
+    } catch (e) {
+      if (!build.mounted) return;
+      build.read(loggerProvider);
+    }
+  }
+}
+
 Future<String> fetchRemote() async => 'raw';
 Future<String> readCache(Ref build) async => 'cached';

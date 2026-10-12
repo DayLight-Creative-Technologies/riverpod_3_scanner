@@ -12,7 +12,7 @@ License: MIT
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Pattern, Set, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, FrozenSet, Iterable, List, Match, Optional, Pattern, Set, Tuple
 
 from .models import Violation, ViolationType, MethodKey
 from .utils import (
@@ -31,7 +31,10 @@ from .utils import (
     params_of_signature,
     captured_ref_names,
     captured_ref_names_at,
+    captured_ref_uses,
+    first_unguarded_captured_use,
     mounted_receivers,
+    signature_declares_async,
     FUTURE_TYPE_PATTERN,
     PARAM_LIST_PATTERN,
     infer_type_from_provider,
@@ -191,6 +194,7 @@ def _leftmost_unguarded_danger(
     content: str,
     danger_patterns: Iterable[Pattern[str]],
     guard_pattern: Pattern[str],
+    extra_dangers: Iterable['re.Match[str]'] = (),
 ) -> Optional['re.Match[str]']:
     """Return the leftmost dangerous use that NO guard dominates, else ``None``.
 
@@ -202,7 +206,9 @@ def _leftmost_unguarded_danger(
     So ``if (url != null) { await go(); if (!ref.mounted) return; }`` followed
     by ``ref.read(p)`` leaves that read unguarded when ``url`` is null. A guard
     AFTER a use never protects it. ``None`` is returned only when every
-    dangerous use is dominated by a guard.
+    dangerous use is dominated by a guard. ``extra_dangers`` are uses the caller
+    found itself (matches in ``content``) — a pattern cannot say whether a use of
+    a captured Ref runs on a Ref that may have been replaced.
 
     Used by the deferred-callback check (VIOLATION 10), the catch / finally
     checks (VIOLATION 6 / 6b) and the notifier UI-callback check (15b), so all
@@ -250,7 +256,8 @@ def _leftmost_unguarded_danger(
         guard_blocks.append((protected_from - 1, block_end))
 
     dangers = sorted(
-        (found for pattern in danger_patterns for found in pattern.finditer(content)),
+        [found for pattern in danger_patterns for found in pattern.finditer(content)]
+        + list(extra_dangers),
         key=lambda m: m.start(),
     )
     for danger in dangers:
@@ -913,6 +920,54 @@ def _blank_mounted_guarded_regions(code: str, condition: Pattern[str]) -> str:
     return ''.join(blanked)
 
 
+def _leftmost_unguarded_notifier_danger(
+    code: str,
+    captured: FrozenSet[str],
+    guard_for: Callable[[str], Pattern[str]],
+    positive_for: Callable[[str], Pattern[str]],
+) -> Optional[Match[str]]:
+    """The leftmost dangerous use in ``code`` that its own guard does not dominate.
+
+    ``code`` is a span reduced to what counts (comments and string text blanked).
+    The uses are judged per Ref, because the Refs are not interchangeable:
+
+    - ``ref`` and ``state`` (``_CATCH_DANGER_PATTERNS``), and the FRESH uses of a
+      captured local (``final build = ref; build.read(p)`` — the one Ref, see
+      ``captured_ref_uses``), are guarded by a mounted check on ``ref`` OR on any
+      captured Ref: where ``build.mounted`` passes the Notifier's current ``ref``
+      IS that build's Ref (utils 5c).
+    - a STALE use of a captured Ref (``build.read``, ``build.onDispose`` … after
+      an await, in a closure, on a ``Ref`` parameter) is guarded by a mounted
+      check on THAT Ref only: ``ref.mounted`` says nothing about a Ref a rebuild
+      has replaced.
+
+    ``guard_for`` / ``positive_for`` map a regex for the guard's receiver to the
+    early-return guard and the positive condition. A positive check blanks the
+    region it guards for the subject it names alone.
+    """
+    stale, fresh = captured_ref_uses(code, captured)
+    subjects: List[Tuple[Iterable[Pattern[str]], str, List[Match[str]]]] = [
+        (_CATCH_DANGER_PATTERNS, mounted_receivers(captured), [use for _, use in fresh]),
+    ]
+    subjects.extend(
+        ((), re.escape(name), [use for owner, use in stale if owner == name])
+        for name in sorted(captured)
+    )
+    found: List[Match[str]] = []
+    for patterns, receivers, uses in subjects:
+        reduced = _blank_mounted_guarded_regions(code, positive_for(receivers))
+        danger = _leftmost_unguarded_danger(
+            reduced,
+            patterns,
+            guard_for(receivers),
+            # A use inside a region its own positive check guards was blanked.
+            [use for use in uses if reduced[use.start():use.end()] == code[use.start():use.end()]],
+        )
+        if danger is not None:
+            found.append(danger)
+    return min(found, key=lambda match: match.start()) if found else None
+
+
 # ===========================================================================
 # CHECKER 2: check_async_method_safety
 # ===========================================================================
@@ -954,16 +1009,20 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         # guard on a Ref this method captured (a `Ref` parameter, a local
         # initialised from `ref`): past `if (!build.mounted) return;` the
         # Notifier's current `ref` IS that build's Ref (utils 5c).
+        captured: FrozenSet[str] = frozenset()
         if ctx.is_consumer_state:
             mounted_pattern = r'if\s*\(\s*!mounted\s*\)'
-            positive_mounted_condition = _RE_POSITIVE_MOUNTED_CONDITION_STATE
+            guard_for = lambda _receivers: re.compile(mounted_pattern)  # noqa: E731
+            positive_for = lambda _receivers: _RE_POSITIVE_MOUNTED_CONDITION_STATE  # noqa: E731
         else:
-            receivers = mounted_receivers(captured_ref_names(
+            captured = captured_ref_names(
                 params_of_signature(method_match.group(0), method_name), method_body
-            ))
-            mounted_pattern = rf'if\s*\(\s*!{receivers}\.mounted\s*\)'
-            positive_mounted_condition = _positive_notifier_condition(receivers)
-        mounted_re = re.compile(mounted_pattern)
+            )
+            mounted_pattern = rf'if\s*\(\s*!{mounted_receivers(captured)}\.mounted\s*\)'
+            guard_for = lambda receivers: re.compile(  # noqa: E731
+                rf'if\s*\(\s*!{receivers}\.mounted\s*\)'
+            )
+            positive_for = _positive_notifier_condition
 
         # ---- VIOLATION 4: ref/state operation before mounted check ----
         first_10_lines = '\n'.join(method_lines[:10])
@@ -998,6 +1057,20 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         if method_name != 'build' and not ctx.is_consumer_state:
             state_access_match = first_state_access(first_10_lines)
 
+        # A use of a Ref this method captured is an operation too (build() has no
+        # entry to guard). A local initialised from `ref` and used right after
+        # its declaration IS `ref` there — a ref operation, covered by any guard
+        # that covers one. A `Ref` parameter, or a local used after an await or
+        # in a closure, may be a replaced Ref: only its OWN guard covers it
+        # (utils.captured_ref_uses).
+        entry_code = blank_string_literals(first_10_lines_no_comments)
+        fresh_entry_use = None
+        captured_entry_use = None
+        if method_name != 'build':
+            fresh_uses = captured_ref_uses(entry_code, captured)[1]
+            fresh_entry_use = fresh_uses[0] if fresh_uses else None
+            captured_entry_use = first_unguarded_captured_use(entry_code, captured)
+
         # Find the earliest ref-equivalent operation position
         first_operation_pos = None
         if ref_operation_match:
@@ -1005,6 +1078,11 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         if state_access_match:
             if first_operation_pos is None or state_access_match.start() < first_operation_pos:
                 first_operation_pos = state_access_match.start()
+        fresh_is_first = fresh_entry_use is not None and (
+            first_operation_pos is None or fresh_entry_use[1].start() < first_operation_pos
+        )
+        if fresh_is_first:
+            first_operation_pos = fresh_entry_use[1].start()
 
         # Mounted check must appear BEFORE the first operation to be protective
         has_mounted_before_operation = False
@@ -1013,11 +1091,21 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
             if mounted_match and mounted_match.start() < first_operation_pos:
                 has_mounted_before_operation = True
 
-        if (ref_operation_match or state_access_match) and not has_mounted_before_operation:
-            if ref_operation_match:
-                operation_name = f"ref.{ref_operation_match.group(1)}()"
-            else:
-                operation_name = "state access"
+        unguarded_ref_operation = first_operation_pos is not None and not has_mounted_before_operation
+        if unguarded_ref_operation or captured_entry_use is not None:
+            entry_findings: List[Tuple[int, str]] = []
+            if unguarded_ref_operation:
+                if fresh_is_first:
+                    name, use = fresh_entry_use
+                    entry_findings.append((use.start(), f"{name}.{use.group(1)}()"))
+                elif ref_operation_match:
+                    entry_findings.append((first_operation_pos, f"ref.{ref_operation_match.group(1)}()"))
+                else:
+                    entry_findings.append((first_operation_pos, "state access"))
+            if captured_entry_use is not None:
+                name, use = captured_entry_use
+                entry_findings.append((use.start(), f"{name}.{use.group(1)}()"))
+            operation_name = min(entry_findings)[1]
             abs_line = full_content[:class_start + method_start].count('\n') + 2
             snippet_start = max(0, abs_line - 1)
             snippet_end = min(len(lines), abs_line + 5)
@@ -1085,9 +1173,33 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
                 _guard_branch_exits(next_code, *_branch_span(next_code, guard.end()))
                 for guard in re.finditer(mounted_pattern, next_code)
             )
-            has_significant = has_significant_code_after_await(next_lines_str)
+            # A use of a Ref the method captured (`build.read(p)`, `build.listen(…)`,
+            # `build.onDispose(…)`) is the same crash as `ref.read(p)`. A local
+            # initialised from `ref` and used right after its declaration in this
+            # window IS `ref` there: significant code, covered by any exiting
+            # guard. Every other use may run on a replaced Ref and needs the
+            # captured Ref's OWN exiting guard in the window (utils.captured_ref_uses).
+            stale_uses, fresh_uses = captured_ref_uses(next_code, captured)
+            has_significant = bool(fresh_uses) or has_significant_code_after_await(next_lines_str)
+            unguarded_capture = None
+            for name, use in stale_uses:
+                own_guard = re.compile(rf'if\s*\(\s*!{re.escape(name)}\.mounted\s*\)')
+                if not any(
+                    _guard_branch_exits(next_code, *_branch_span(next_code, guard.end()))
+                    for guard in own_guard.finditer(next_code)
+                ):
+                    unguarded_capture = (name, use)
+                    break
 
-            if has_significant and not has_mounted_after:
+            if (has_significant and not has_mounted_after) or unguarded_capture is not None:
+                if has_significant and not has_mounted_after:
+                    after_await_context = f"Method {method_name}(): Missing ref.mounted after await"
+                else:
+                    capture_name, capture_use = unguarded_capture
+                    after_await_context = (
+                        f"Method {method_name}(): Missing {capture_name}.mounted after await "
+                        f"({capture_name}.{capture_use.group(1)}() uses a Ref no mounted guard covers)"
+                    )
                 abs_line = full_content[:class_start + method_start + await_match.start()].count('\n') + 1
                 snippet_start = max(0, abs_line - 1)
                 snippet_end = min(len(lines), abs_line + 5)
@@ -1098,7 +1210,7 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
                     class_name=ctx.class_name,
                     violation_type=ViolationType.MISSING_MOUNTED_AFTER_AWAIT,
                     line_number=abs_line,
-                    context=f"Method {method_name}(): Missing ref.mounted after await",
+                    context=after_await_context,
                     code_snippet=snippet,
                     fix_instructions=_get_missing_mounted_after_await_fix(),
                 ))
@@ -1130,12 +1242,9 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
                 # Comments and string-literal text cannot hold a guard or a use —
                 # a log message like 'Could not restore state.' is not a state access.
                 # What a positive mounted check guards is safe by construction.
-                catch_code = _blank_mounted_guarded_regions(
+                danger = _leftmost_unguarded_notifier_danger(
                     blank_string_literals(remove_comments(catch_body)),
-                    positive_mounted_condition,
-                )
-                danger = _leftmost_unguarded_danger(
-                    catch_code, _CATCH_DANGER_PATTERNS, mounted_re
+                    captured, guard_for, positive_for,
                 )
                 if danger is None:
                     continue
@@ -1177,8 +1286,10 @@ def _find_sync_methods_with_ref_operations(
 ) -> List[Tuple[str, int, str]]:
     """Find sync methods (non-async) that use ref.read() or state access without mounted checks.
 
-    Detects two ref-equivalent operation types:
+    Detects three ref-equivalent operation types:
     - ref.read() — explicit ref operation
+    - any use of a Ref the method captured (a ``Ref`` parameter, a local
+      initialised from ``ref``), judged against that Ref's own mounted guard
     - state access (state = or state., or a string interpolation that reads it:
       '$state' / '${state}') — implicit ref operation on notifiers
       (accessing `state` on a disposed notifier throws UnmountedRefException)
@@ -1187,8 +1298,12 @@ def _find_sync_methods_with_ref_operations(
     """
     results: List[Tuple[str, int, str]] = []
 
+    # The optional body marker is part of the match, so a method's async-ness is
+    # read from its OWN signature (`signature_declares_async`), never from the
+    # text before it — that belongs to the previous member.
     method_pattern = re.compile(
-        r'(?:void|bool|String|int|double|num|\w+\?)\s+(\w+)\s*\(([^)]*)\)\s*\{',
+        r'(?:void|bool|String|int|double|num|\w+\?)\s+(\w+)\s*\(([^)]*)\)'
+        r'\s*(?:async\s*\*?|sync\s*\*)?\s*\{',
         re.DOTALL,
     )
 
@@ -1198,21 +1313,25 @@ def _find_sync_methods_with_ref_operations(
         method_end = find_matching_brace(class_content, method_start)
         method_body = class_content[method_start:method_end]
 
-        # A Notifier's guard may name a Ref the method captured (utils 5c).
-        if is_consumer_state:
-            mounted_pattern = r'if\s*\(\s*!mounted\s*\)\s*return'
-        else:
-            receivers = mounted_receivers(captured_ref_names(method_match.group(2), method_body))
-            mounted_pattern = rf'if\s*\(\s*!{receivers}\.mounted\s*\)\s*return'
-
         # Skip framework lifecycle methods
         if method_name in FRAMEWORK_LIFECYCLE_METHODS:
             continue
 
-        # Skip async methods
-        full_signature = class_content[max(0, method_match.start() - 50):method_match.end() + 20]
-        if re.search(r'\basync\b', full_signature):
+        # Skip async methods: V5 judges those. Async-ness is the method's own
+        # signature (gap #1075) — a sync helper declared right after an async
+        # method is a sync helper.
+        if signature_declares_async(method_match.group(0)):
             continue
+
+        # A Notifier's guard may name a Ref the method captured (utils 5c), and a
+        # use of a captured Ref is a ref use judged against that Ref's own guard.
+        captured: FrozenSet[str] = frozenset()
+        if is_consumer_state:
+            mounted_pattern = r'if\s*\(\s*!mounted\s*\)\s*return'
+        else:
+            captured = captured_ref_names(method_match.group(2), method_body)
+            receivers = mounted_receivers(captured)
+            mounted_pattern = rf'if\s*\(\s*!{receivers}\.mounted\s*\)\s*return'
 
         # Find ref.read() operations
         ref_read_matches = list(re.finditer(r'ref\.read\(', method_body))
@@ -1223,20 +1342,33 @@ def _find_sync_methods_with_ref_operations(
         if not is_consumer_state:
             first_state_match = first_state_access(method_body)
 
-        if not ref_read_matches and first_state_match is None:
+        # A use of a captured Ref: a local initialised from `ref` and used right
+        # after its declaration IS `ref` (a ref operation); any other use may run
+        # on a replaced Ref and needs that Ref's OWN guard (utils.captured_ref_uses).
+        method_code = blank_string_literals(remove_comments(method_body))
+        unguarded_capture = first_unguarded_captured_use(method_code, captured, r'\s*return')
+        fresh_capture_uses = captured_ref_uses(method_code, captured)[1]
+
+        if (
+            not ref_read_matches
+            and first_state_match is None
+            and unguarded_capture is None
+            and not fresh_capture_uses
+        ):
             continue
 
         # Find earliest ref-equivalent operation
         all_positions = [m.start() for m in ref_read_matches]
         if first_state_match is not None:
             all_positions.append(first_state_match.start())
+        all_positions.extend(use.start() for _, use in fresh_capture_uses)
 
-        first_operation_pos = min(all_positions)
+        unguarded = unguarded_capture is not None
+        if all_positions:
+            before_first_operation = method_body[:min(all_positions)]
+            unguarded = unguarded or not re.search(mounted_pattern, before_first_operation)
 
-        before_first_operation = method_body[:first_operation_pos]
-        has_mounted_check = re.search(mounted_pattern, before_first_operation)
-
-        if not has_mounted_check:
+        if unguarded:
             line_offset = class_content[:method_match.start()].count('\n')
             results.append((method_name, line_offset, method_body))
 
@@ -3639,25 +3771,44 @@ def check_async_star_function_providers(
 
         # First dangerous ref operation (read/watch/listen only).
         op_match = RE_REF_OPERATION.search(body)
-        if not op_match:
-            continue  # provider never reads/watches/listens — safe
 
         # An `if (!ref.mounted)` guard occurring before that operation makes
         # it safe (same guard-before-operation logic as check_async_method_safety).
         # A guard on a Ref the body captured (`final build = ref;`) is the same
         # guard (utils 5c), as is one on any `Ref`-typed parameter.
-        receivers = mounted_receivers(captured_ref_names(
-            stripped[paren_open:paren_close], body
-        ))
+        captured = captured_ref_names(stripped[paren_open:paren_close], body)
+        receivers = mounted_receivers(captured)
         guard_match = re.compile(rf'if\s*\(\s*!{receivers}\.mounted\s*\)').search(body)
-        if guard_match and guard_match.start() < op_match.start():
-            continue
+        # A use of a captured Ref is an operation too. A local initialised from
+        # `ref` and used right after its declaration IS `ref` there, so any guard
+        # that covers a `ref` operation covers it; any other use may run on a
+        # replaced Ref and is judged against that Ref's OWN guard, which
+        # `ref.mounted` does not stand in for (utils.captured_ref_uses).
+        body_code = blank_string_literals(body)
+        operations: List[Tuple[int, str]] = []
+        if op_match:
+            operations.append((op_match.start(), f"ref.{op_match.group(1)}()"))
+        for name, use in captured_ref_uses(body_code, captured)[1][:1]:
+            operations.append((use.start(), f"{name}.{use.group(1)}()"))
+        unguarded = None  # (position in body, operation name)
+        if operations:
+            first_operation = min(operations)
+            if not (guard_match and guard_match.start() < first_operation[0]):
+                unguarded = first_operation
+        captured_use = first_unguarded_captured_use(body_code, captured)
+        if captured_use is not None and (unguarded is None or captured_use[1].start() < unguarded[0]):
+            unguarded = (
+                captured_use[1].start(),
+                f"{captured_use[0]}.{captured_use[1].group(1)}()",
+            )
+        if unguarded is None:
+            continue  # nothing dangerous, or every first use is guarded
 
         # Violation — reported at the unguarded ref operation.
-        op_stripped_idx = body_open + op_match.start()
+        op_stripped_idx = body_open + unguarded[0]
         orig_idx = pos_map.get(op_stripped_idx, op_stripped_idx)
         abs_line = content[:orig_idx].count('\n') + 1
-        op_name = f"ref.{op_match.group(1)}()"
+        op_name = unguarded[1]
 
         violations.append(Violation(
             file_path=str(file_path),
@@ -4179,12 +4330,12 @@ def check_notifier_ui_callbacks(ctx: CheckContext) -> List[Violation]:
             body_open = match.end()
             body_close = find_matching_brace(code, body_open)
             # The closure sees the Refs its enclosing member captured (utils 5c).
-            receivers = mounted_receivers(captured_ref_names_at(code, match.start()))
-            body = _blank_mounted_guarded_regions(
-                code[body_open:body_close], _positive_notifier_condition(receivers)
-            )
-            danger = _leftmost_unguarded_danger(
-                body, _CATCH_DANGER_PATTERNS, _notifier_mounted_guard(receivers)
+            captured = captured_ref_names_at(code, match.start())
+            danger = _leftmost_unguarded_notifier_danger(
+                code[body_open:body_close],
+                captured,
+                _notifier_mounted_guard,
+                _positive_notifier_condition,
             )
             if danger is None:
                 continue

@@ -11,7 +11,7 @@ inside hot-loop methods.
 import re
 import sys
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Match, Optional, Pattern, Set, Tuple
 
 from .models import MethodKey, MethodMetadata
 
@@ -1090,6 +1090,133 @@ def captured_ref_names_at(class_code: str, position: int) -> FrozenSet[str]:
                 class_code[body_open + 1:body_close],
             )
     return frozenset()
+
+
+def captured_ref_use_pattern(name: str) -> Pattern[str]:
+    """A use of the captured Ref ``name``: any member access except ``.mounted``.
+
+    ``build.read(p)``, ``build.watch(p)``, ``build.listen(…)``, ``build.onDispose(…)``,
+    ``build.invalidate(p)`` … Riverpod throws on every use of a disposed Ref
+    (``Ref._throwIfInvalidUsage``), so each is the same violation as the
+    ``ref.read`` the scanner has always judged. ``.mounted`` is the guard
+    itself and never a use. Group 1 is the member. A receiver that merely ends
+    like the name (``other.build.read``, ``rebuild.read``) is not one.
+    """
+    return re.compile(rf'(?<![\w$.]){re.escape(name)}\s*\.\s*(?!mounted\b)([A-Za-z_$][\w$]*)')
+
+
+_RE_AWAIT_TOKEN = re.compile(r'\bawait\b')
+_RE_BLOCK_HEAD = re.compile(r'(?<![\w$.])(?:if|while|switch|for|catch)\s*$')
+
+
+def _arrow_body_end(code: str, start: int) -> int:
+    """End of the expression an ``=>`` function literal returns, starting at ``start``.
+
+    The first ``,`` or ``;`` at depth zero, or the bracket that closes the
+    enclosing call, whichever comes first.
+    """
+    depth = 0
+    for position in range(start, len(code)):
+        char = code[position]
+        if char in '([{':
+            depth += 1
+        elif char in ')]}':
+            depth -= 1
+            if depth < 0:
+                return position
+        elif char in ',;' and depth == 0:
+            return position
+    return len(code)
+
+
+def _runs_on_after_declaration(code: str, declared: int, used: int) -> bool:
+    """Whether the code at ``used`` runs right after the statement at ``declared``.
+
+    False when an ``await`` lies between them (the method suspended: a rebuild
+    may have replaced the Ref) or ``used`` sits inside a function literal that
+    starts between them (a closure runs later). A function literal that ends
+    before ``used`` does not matter, and a condition or loop head — ``if (…) {``,
+    ``for (…) {``, ``catch (e) {`` — is a block, not a function literal.
+    """
+    if _RE_AWAIT_TOKEN.search(code, declared, used):
+        return False
+    for literal in _RE_FUNCTION_LITERAL_PARAMS.finditer(code, declared, used):
+        if _RE_BLOCK_HEAD.search(code[max(0, literal.start() - 12):literal.start()]):
+            continue
+        if literal.group(0).endswith('{'):
+            body_end = find_matching_brace(code, literal.end())
+        else:
+            body_end = _arrow_body_end(code, literal.end())
+        if literal.end() <= used < body_end:
+            return False
+    return True
+
+
+def captured_ref_uses(
+    code: str, names: Iterable[str]
+) -> Tuple[List[Tuple[str, Match[str]]], List[Tuple[str, Match[str]]]]:
+    """Every use of a captured Ref in ``code``, as ``(stale, fresh)``.
+
+    Each is ``(name, match)`` sorted by position. A FRESH use is the use of a
+    LOCAL initialised from ``ref`` (``final build = ref;``) that runs right
+    after that declaration — no ``await``, no function literal between: the
+    Notifier's current ``ref`` and ``build`` are the one Ref there, so the use
+    is a ``ref`` use and is judged exactly as one (a guard on ``ref`` or on any
+    captured Ref before it covers it). Every other use is STALE: it may run on
+    a Ref a rebuild has replaced (a ``Ref`` parameter, whose origin the method
+    does not know, a local used after an await or in a closure), so only that
+    Ref's own mounted guard covers it. ``code`` is a span the caller has
+    reduced (comments and string text blanked).
+    """
+    declarations: Dict[str, List[int]] = {}
+    for local in _RE_CAPTURED_REF_LOCAL.finditer(code):
+        declarations.setdefault(local.group(1), []).append(local.end())
+    stale: List[Tuple[str, Match[str]]] = []
+    fresh: List[Tuple[str, Match[str]]] = []
+    for name in sorted(set(names) - {'ref'}):
+        for use in captured_ref_use_pattern(name).finditer(code):
+            earlier = [end for end in declarations.get(name, ()) if end <= use.start()]
+            if earlier and _runs_on_after_declaration(code, max(earlier), use.start()):
+                fresh.append((name, use))
+            else:
+                stale.append((name, use))
+    key = lambda found: found[1].start()  # noqa: E731
+    return sorted(stale, key=key), sorted(fresh, key=key)
+
+
+def first_unguarded_captured_use(
+    code: str, names: Iterable[str], guard_suffix: str = ''
+) -> Optional[Tuple[str, Match[str]]]:
+    """The leftmost STALE use of a captured Ref that its OWN guard does not precede.
+
+    ``(name, match)`` of the use, else ``None``. A captured Ref is guarded by
+    ``if (!name.mounted)`` on that Ref and by nothing else: ``ref.mounted``
+    does not stand in for it, because ``ref`` is the element's CURRENT Ref
+    while a captured one may be a build's older Ref — ``build.mounted`` being
+    true implies ``ref.mounted`` (the 1.16.0 rule), not the other way round,
+    and ``ref.mounted`` says nothing about ``build``. Fresh uses (see
+    :func:`captured_ref_uses`) are ``ref`` uses and are not judged here.
+    ``guard_suffix`` is appended to the guard pattern (``\\s*return`` for an
+    early-return guard). ``code`` is a span the caller has reduced; this
+    judges the entry of one span, as the entry-guard checks do.
+    """
+    for name, use in captured_ref_uses(code, names)[0]:
+        guard = re.search(rf'if\s*\(\s*!{re.escape(name)}\.mounted\s*\){guard_suffix}', code)
+        if guard is None or guard.start() > use.start():
+            return name, use
+    return None
+
+
+def signature_declares_async(declaration: str) -> bool:
+    """Whether a method declaration ends in an ``async`` / ``async*`` / ``sync*`` body marker.
+
+    ``declaration`` is the text of ONE method, from its return type to the
+    opening brace of its body. Async-ness is a property of the text between the
+    parameter list's closing paren and the body — never of whatever precedes
+    the declaration, which belongs to the previous member (a sync helper
+    declared right after an ``async`` method is not async).
+    """
+    return re.search(r'\)\s*(?:async\s*\*?|sync\s*\*)\s*\{?\s*$', declaration) is not None
 
 
 # =============================================================================

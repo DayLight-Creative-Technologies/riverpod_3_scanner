@@ -26,7 +26,7 @@ from .utils import (
     RE_METHOD_CALL, RE_CALLBACK_START, RE_AWAIT, RE_RIVERPOD_ANNOTATION,
     SKIP_METHODS, FRAMEWORK_LIFECYCLE_METHODS, ASYNC_CALLBACK_PARAMS,
     async_signature_head, captured_ref_names, mounted_receivers,
-    params_of_signature,
+    params_of_signature, signature_declares_async,
 )
 
 
@@ -390,9 +390,9 @@ def _pass15_build_method_database(file_path: Path, ctx: AnalysisContext) -> None
                 method_body = _find_method_body(class_content, method_match.end())
 
                 # Check metadata
-                sig_start = max(0, method_match.start() - 50)
-                full_signature = class_content[sig_start:method_match.end() + 20]
-                is_async = bool(re.search(r'\basync\b', full_signature))
+                # Async-ness is the method's OWN signature (gap #1075), not the text
+                # before it, which belongs to the previous member.
+                is_async = signature_declares_async(method_match.group(0))
                 has_ref_read = bool(RE_REF_READ.search(method_body))
 
                 # Check if mounted appears BEFORE first ref.read()

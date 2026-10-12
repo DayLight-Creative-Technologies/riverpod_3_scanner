@@ -5,6 +5,23 @@ All notable changes to the Riverpod 3.0 Safety Scanner will be documented in thi
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0] - 2026-10-12
+
+### Fixed
+
+- **A sync helper declared right after an `async` method was taken for async and never checked by VIOLATION 10** (SocialScoreKeeper gap #1075). `_find_sync_methods_with_ref_operations` decided whether a method was async by looking for `async` in the 50 characters before its declaration, which is the end of the *previous* member whenever the two are adjacent. Async-ness is now read from the method's own signature — the text between its parameter list's closing paren and its body (`utils.signature_declares_async`; the declaration pattern carries the optional `async` / `async*` / `sync*` marker). The pass-1.5 method database's `MethodMetadata.is_async` had the same window and is fixed the same way.
+- **A use of a captured Ref was invisible to every danger pattern** (SocialScoreKeeper gap #1076). Since 1.16.0 a mounted guard on a captured Ref is a guard, but the patterns that find a use matched only the literal `ref.` — so `build.read(p)`, `build.watch(p)`, `build.listen(…)`, `build.onDispose(…)` after an `await` (or in a `catch` / `finally`) with no guard were not flagged, although Riverpod throws on every use of a disposed Ref. A use of a captured Ref (`utils.captured_ref_use_pattern`: any member of it but `.mounted`) now counts as a ref use in every check that judges one: after an `await` (5), at a method's entry (4), in a `catch` / `finally` (6, 6b), in a closure a Notifier hands to a widget (15b), in a sync helper called from an async gap (10) and in an `async*` function provider (14).
+
+### Changed
+
+- **Which guard covers a use of a captured Ref.** The captured Ref's **own** `if (!build.mounted)` covers it, and nothing else does: `build.mounted` true implies `ref.mounted` (1.16.0), but `ref.mounted` says nothing about a `build` a rebuild has replaced, so `ref.mounted` is *not* taken as equivalent for a use of `build`, and neither is a guard on another captured Ref. A use of `ref` and of `state` is covered by a guard on `ref` or on any captured Ref, as before.
+- **A local captured from `ref` and used right after its declaration is `ref`** (`utils.captured_ref_uses`): `if (!ref.mounted) return; final build = ref; build.read(p);` is judged as `ref.read(p)` would be and needs no guard on `build`. The use is *fresh* only while nothing can have replaced the Ref — no `await` and no enclosing function literal between the declaration and the use. A `Ref` parameter, a local used after an `await`, and a use inside a closure are *stale* and need the capture's own guard.
+- `utils.first_unguarded_captured_use`, `captured_ref_uses`, `captured_ref_use_pattern` and `signature_declares_async` are new; `checkers._leftmost_unguarded_danger` takes `extra_dangers`, and `checkers._leftmost_unguarded_notifier_danger` judges ref, state and each captured Ref against its own guard.
+
+### Tests
+
+871 (was 747). 124 new in `test_captured_ref_guards.py`, plus one case in `captured_ref_guard_passing.dart` and three in `captured_ref_guard_violations.dart`: the helper declared before and after an `async` method (and the method database's `is_async`); every use (`read`, `watch`, `listen`, `onDispose`, `invalidate`, `refresh`, `exists`) after an `await` flagged without a guard and clean with the capture's own; a guard on `ref`, on another captured Ref, separated by another `await`, or that does not exit leaving the use flagged; the same in a `catch`, an `on` clause and a `finally` (early return and positive block), in a notifier UI callback, at a method's entry, in a sync helper and in an `async*` provider; the fresh / stale boundary (a declaration after a guard, after an `await`, a closure that ends before the use, a closure around it, a block head); and the helpers' own units. Mutation-checked: each fix switched off in turn (20 mutants) fails at least one test and none survives.
+
 ## [1.16.0] - 2026-10-12
 
 ### Added

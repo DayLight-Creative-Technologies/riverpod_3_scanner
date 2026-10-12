@@ -77,4 +77,55 @@ class GuardThenAwait extends _$GuardThenAwait {
   }
 }
 
+// =========================================================================
+// Case 5: a USE of the captured Ref after an await, no guard on it
+// =========================================================================
+@riverpod
+class UseAfterAwait extends _$UseAfterAwait {
+  @override
+  String build() => 'initial';
+
+  Future<void> load(Ref build) async {
+    if (!build.mounted) return;
+    await fetchRemote();
+    build.read(sourceProvider);
+  }
+}
+
+// =========================================================================
+// Case 6: the guard is on `ref`, which says nothing about the captured Ref
+// =========================================================================
+@riverpod
+class UseGuardedOnRef extends _$UseGuardedOnRef {
+  @override
+  String build() => 'initial';
+
+  Future<void> load(Ref build) async {
+    if (!build.mounted) return;
+    await fetchRemote();
+    if (!ref.mounted) return;
+    build.listen(sourceProvider, (previous, next) {});
+  }
+}
+
+// =========================================================================
+// Case 7: a USE of the captured Ref in a catch, no guard on it
+// =========================================================================
+@riverpod
+class UseInCatch extends _$UseInCatch {
+  @override
+  String build() => 'initial';
+
+  Future<void> load(Ref build) async {
+    if (!build.mounted) return;
+    try {
+      await fetchRemote();
+      if (!build.mounted) return;
+      state = 'done';
+    } catch (e) {
+      build.read(loggerProvider);
+    }
+  }
+}
+
 Future<String> fetchRemote() async => 'raw';

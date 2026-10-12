@@ -39,13 +39,20 @@ EXPECTED = {
     # initialised from `ref`) is a guard (v1.16.0, SSK gap #1073). The
     # violations fixture pins the look-alikes that are not: a non-Ref parameter,
     # a local initialised from anything else, a field, and a guard another await
-    # separates from the access.
+    # separates from the access. A USE of a captured Ref (`build.read`,
+    # `build.listen`, …) is a ref use judged against that Ref's own guard
+    # (v1.17.0, SSK gap #1076): the passing fixture guards them, the violations
+    # fixture leaves one unguarded after an await, one guarded on `ref` only and
+    # one in a catch.
     "captured_ref_guard_passing.dart": [],
     "captured_ref_guard_violations.dart": [
         ("missing_mounted_after_await", 21),
         ("missing_mounted_after_await", 38),
         ("missing_mounted_after_await", 56),
         ("missing_mounted_after_await", 75),
+        ("missing_mounted_after_await", 90),
+        ("missing_mounted_after_await", 105),
+        ("missing_mounted_in_catch", 125),
     ],
     "catch_block_passing.dart": [],
     "catch_block_violations.dart": [

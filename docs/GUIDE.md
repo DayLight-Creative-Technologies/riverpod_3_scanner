@@ -422,6 +422,40 @@ of another type (`BuildContext`, `WidgetRef`, `Ref?`), a field, a name another
 method declared, and a guard another `await` separates from the access (each
 `await` needs its own guard, as ever).
 
+**A captured Ref's use is a ref use (v1.17.0+).** `build.read(p)`,
+`build.watch(p)`, `build.listen(…)`, `build.onDispose(…)`, `build.invalidate(p)` —
+any member of a captured Ref but `.mounted` — throws on a disposed Ref exactly as
+`ref.read(p)` does, so it is judged wherever `ref.read(p)` is: after an `await`
+(VIOLATION 5), at a method's entry (4), in a `catch` / `finally` (6, 6b), in a
+closure a Notifier hands to a widget (15b), in a sync helper (10) and in an
+`async*` function provider (14).
+
+```dart
+Future<void> reload() async {
+  final build = ref;
+  if (!build.mounted) return;
+  await work();
+  build.read(sourceProvider);       // ❌ VIOLATION 5: no guard since the await
+  if (!build.mounted) return;
+  build.read(sourceProvider);       // ✅ the captured Ref's own guard
+}
+```
+
+Which guard covers a use depends on which Ref it is:
+
+- A use of the captured Ref is covered by **that Ref's own** `if (!build.mounted)`
+  and by nothing else. `ref.mounted` does not cover it: `build.mounted` being true
+  implies `ref.mounted` (the element's current Ref is `build`), but `ref.mounted`
+  says nothing about a `build` a rebuild has replaced. A guard on another captured
+  Ref does not cover it either.
+- A use of `ref` (and of `state`) is covered by a guard on `ref` **or** on any
+  captured Ref, as in v1.16.0.
+- A **local** captured from `ref` and used right after its declaration — no
+  `await`, no closure between — **is** `ref` there, so it is judged as a `ref` use:
+  `if (!ref.mounted) return; final build = ref; build.read(p);` is clean. A `Ref`
+  *parameter* (its origin is unknown), a local used after an `await`, and a use
+  inside a closure may be on a replaced Ref and need the capture's own guard.
+
 ### Basic Template (ConsumerStatefulWidget)
 
 ```dart
