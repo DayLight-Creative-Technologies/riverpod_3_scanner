@@ -27,6 +27,7 @@ from .utils import (
     SKIP_METHODS, FRAMEWORK_LIFECYCLE_METHODS, ASYNC_CALLBACK_PARAMS,
     async_signature_head, captured_ref_names, mounted_receivers,
     params_of_signature, signature_declares_async,
+    blank_spans, blank_string_literals, pre_suspension_spans,
 )
 
 
@@ -496,6 +497,9 @@ def _trace_async_method_calls(
         ))
         mounted_any = re.compile(rf'if\s*\(\s*!(?:{receivers}\.)?mounted\s*\)\s*return')
 
+        method_code = blank_string_literals(remove_comments(method_body))
+        declared_in = blank_string_literals(remove_comments(class_content))
+
         # For each await, find method calls that come AFTER it
         for await_pos in await_positions:
             after_await = method_body[await_pos:]
@@ -503,9 +507,12 @@ def _trace_async_method_calls(
             # Find next mounted check (if any)
             mounted_check_match = mounted_any.search(after_await)
 
-            # Danger zone: code between await and next mounted check (or end)
+            # Danger zone: code between await and next mounted check (or end).
+            # What the awaited expression runs before it suspends (an arm that
+            # `fold` / `when` calls before it returns, utils 5d) is not after it.
             search_end = mounted_check_match.start() if mounted_check_match else len(after_await)
-            danger_zone = after_await[:search_end]
+            before_suspension = pre_suspension_spans(method_code, await_pos, declared_in)
+            danger_zone = blank_spans(method_body, before_suspension)[await_pos:][:search_end]
 
             # Resolve all method calls in the danger zone
             resolve_method_calls_in_body(
@@ -524,6 +531,7 @@ def _trace_callback_parameter_calls(
     ctx: AnalysisContext,
 ) -> None:
     """Find methods called inside callback parameters (onCompletion:, builder:, etc.)."""
+    class_code = blank_string_literals(remove_comments(class_content))
     for callback_match in RE_CALLBACK_START.finditer(class_content):
         param_name = callback_match.group(1)
 
@@ -535,7 +543,18 @@ def _trace_callback_parameter_calls(
         before_callback = class_content[max(0, callback_pos - 200):callback_pos]
 
         # If 'await' appears within 200 chars before callback, this is async context
-        has_await_before = bool(re.search(r'\bawait\s+\w+', before_callback))
+        # — unless the callback is code that await's own expression runs before it
+        # suspends (an arm `fold` / `when` calls before it returns, utils 5d).
+        window_start = max(0, callback_pos - 200)
+        has_await_before = any(
+            not any(
+                begin <= callback_match.end() < finish
+                for begin, finish in pre_suspension_spans(
+                    class_code, window_start + await_before.start(), class_code
+                )
+            )
+            for await_before in re.finditer(r'\bawait\s+\w+', before_callback)
+        )
 
         # Also check if callback contains await (callback is async)
         has_await_inside = bool(RE_AWAIT.search(callback_body))

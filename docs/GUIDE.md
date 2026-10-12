@@ -456,6 +456,68 @@ Which guard covers a use depends on which Ref it is:
   *parameter* (its origin is unknown), a local used after an `await`, and a use
   inside a closure may be on a replaced Ref and need the capture's own guard.
 
+**What an `await` suspends, and what it does not (v1.17.1+).** In
+`await result.fold((failure) async { build.read(p); … }, (ok) async => ok)` the
+call `result.fold(…)` is evaluated first, and `fold` calls the arm it picks
+*before it returns*: the arm runs synchronously, up to its own first `await`, and
+only then does the outer `await` suspend. That code is not "after the await" — the
+guard above the await still covers it — so the scanner does not ask for a second
+guard inside the arm.
+
+```dart
+if (!build.mounted) return;
+final value = await result.fold(
+  (failure) async {
+    build.read(authProvider).signOut();   // ✅ runs before fold returns
+    await retry();
+    build.read(authProvider).refresh();   // ❌ VIOLATION 5: after the arm's own await
+    …
+  },
+  (ok) async => ok,
+);
+```
+
+Exactly what is treated as running before the outer `await` suspends:
+
+- the callee is one of `fold`, `flatMap`, `mapLeft`, `getOrElse`, `when`,
+  `maybeWhen`, `whenOrNull`, `whenData`, `map`, `maybeMap`, `mapOrNull`, `forEach`,
+  `where`, `any`, `every`, `firstWhere`, `lastWhere`, `singleWhere`,
+  `firstWhereOrNull`, `lastWhereOrNull`, `expand`, `sort`, `sortBy`, `groupBy`,
+  `removeWhere`, `retainWhere`, `putIfAbsent`, `update`, `updateAll`, `reduce`,
+  `indexWhere`, `takeWhile`, `skipWhile`, `whereType` — the set SocialScoreKeeper's
+  gate #98 uses — called as a member (`x.fold(…)`, `x?.when(…)`), inside the awaited
+  expression and not inside a function literal of it;
+- the closure is a function literal passed directly as an argument (`(l) {…}`,
+  `(l) async {…}`, `(l) => …`, `data: (d) {…}`); a tear-off has no body here and an
+  `async*` / `sync*` body runs when it is iterated;
+- the code is before the closure's **own** first `await` (an `await` of a nested
+  closure is not its own), and not inside a loop that holds one of its awaits.
+
+Everything else stays after the await: the closure's code after its own first
+`await`, a closure passed to any other callee (`Future.delayed(d, () => …)`,
+`.then(…)`, `.timeout(…)`), and a closure of a sync-named callee whose receiver is
+a Future or a Stream, whose methods of those names run the closure later.
+
+The scanner reads text, not types, so *"a Future or a Stream"* is decided from the
+receiver's text, conservatively: the callee is taken for async when the receiver
+chain contains an identifier that starts with `Future` / `Stream` or ends in
+`future` / `stream` in any case (`stream`, `userStream`, `provider.future`,
+`Stream.fromIterable(xs)`), a `watchXxx` call, `snapshots`, `asStream`,
+`asBroadcastStream`, `then` / `catchError` / `whenComplete` / `timeout`, or
+`notifier` (`AsyncNotifier.update` runs its callback after awaiting the state);
+or when the chain starts at a name the class declares with a `Future` / `Stream`
+type or initialises from such a chain. What it **cannot** exclude is a receiver
+only a type checker knows is async — a local, field or getter whose name and
+initialiser say nothing (`final s = repo.changes(); await s.map(…)`), and anything
+reached through one (`s.where(p).map(f)`); its closure is read as running before
+the callee returns. A call with no receiver (`fold(…)`, `update(…)` inside the
+notifier) is not treated as a sync callee either.
+
+The same reading applies wherever the scanner judges "after an await": VIOLATION 5,
+VIOLATION 15 (an async event handler's `ref` use) and VIOLATION 10's call graph (a
+sync helper called from an async gap). A guard is still found anywhere in the
+window; only uses are left out.
+
 ### Basic Template (ConsumerStatefulWidget)
 
 ```dart

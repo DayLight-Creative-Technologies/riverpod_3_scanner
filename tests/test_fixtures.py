@@ -43,7 +43,11 @@ EXPECTED = {
     # `build.listen`, …) is a ref use judged against that Ref's own guard
     # (v1.17.0, SSK gap #1076): the passing fixture guards them, the violations
     # fixture leaves one unguarded after an await, one guarded on `ref` only and
-    # one in a catch.
+    # one in a catch. The arm of a `fold` / `when` runs before the outer await
+    # suspends, so its code up to its own first await is not "after the await"
+    # (v1.17.1): the passing fixture has one such arm; the violations fixture
+    # pins the arm's code after its own first await and a closure of a callee
+    # that does not run it before returning (`Future.delayed`).
     "captured_ref_guard_passing.dart": [],
     "captured_ref_guard_violations.dart": [
         ("missing_mounted_after_await", 21),
@@ -53,6 +57,9 @@ EXPECTED = {
         ("missing_mounted_after_await", 90),
         ("missing_mounted_after_await", 105),
         ("missing_mounted_in_catch", 125),
+        ("missing_mounted_after_await", 144),
+        ("missing_mounted_after_await", 146),
+        ("missing_mounted_after_await", 152),
     ],
     "catch_block_passing.dart": [],
     "catch_block_violations.dart": [

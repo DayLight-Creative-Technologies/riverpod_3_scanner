@@ -128,4 +128,33 @@ class UseInCatch extends _$UseInCatch {
   }
 }
 
+// =========================================================================
+// Case 8: the arm's code AFTER its own first await, and a closure of a callee
+// that does not run it before returning
+// =========================================================================
+@riverpod
+class FoldArmLater extends _$FoldArmLater {
+  @override
+  String build() => 'initial';
+
+  Future<void> load(Ref build) async {
+    if (!build.mounted) return;
+    final result = await fetchEither();
+    if (!build.mounted) return;
+    final value = await result.fold(
+      (failure) async {
+        await fetchRemote();
+        build.read(loggerProvider);
+        return 'failed';
+      },
+      (ok) async => ok,
+    );
+    await Future.delayed(
+      const Duration(seconds: 1),
+      () => build.read(loggerProvider),
+    );
+    log(value);
+  }
+}
+
 Future<String> fetchRemote() async => 'raw';

@@ -93,5 +93,31 @@ class GuardedUses extends _$GuardedUses {
   }
 }
 
+// =========================================================================
+// Case 4: the arm of a `fold` / `when` runs before the outer await suspends
+// =========================================================================
+// `fold` calls the arm it picks before it returns, so the arm's code up to its
+// own first await is covered by the guard above the await (v1.17.1).
+@riverpod
+class FoldArm extends _$FoldArm {
+  @override
+  String build() => 'initial';
+
+  Future<void> load(Ref build) async {
+    if (!build.mounted) return;
+    final result = await fetchEither();
+    if (!build.mounted) return;
+    final value = await result.fold(
+      (failure) async {
+        build.read(loggerProvider);
+        await fetchRemote();
+        return 'failed';
+      },
+      (ok) async => ok,
+    );
+    log(value);
+  }
+}
+
 Future<String> fetchRemote() async => 'raw';
 Future<String> readCache(Ref build) async => 'cached';

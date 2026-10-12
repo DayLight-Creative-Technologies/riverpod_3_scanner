@@ -1220,6 +1220,363 @@ def signature_declares_async(declaration: str) -> bool:
 
 
 # =============================================================================
+# 5d. Code an await's own expression runs BEFORE it suspends
+# =============================================================================
+#
+# `await x.fold((failure) async { build.read(p); … }, …)` evaluates `x.fold(…)`
+# first, and `fold` calls the arm it picks before it returns: the arm runs
+# synchronously, up to its own first `await`, and only THEN does the outer
+# `await` suspend. Code there is not "after the await" — whatever guarded the
+# outer await's entry still covers it — so a check that reads the lines after
+# an await as post-suspension code must leave those spans out.
+#
+# A callee runs its closure argument before it returns when it is one of
+# SYNC_CALLBACK_NAMES and its target is not a Stream or a Future (whose methods
+# of the same names run the closure later). The scanner reads text, not types,
+# so "not a Stream or a Future" is decided from the RECEIVER'S TEXT, and in the
+# conservative direction: the callee is taken for async, and its closure keeps
+# being judged as post-suspension code, whenever the receiver is VISIBLY one
+# (see `receiver_is_visibly_async`).
+#
+# A span is pre-suspension only when ALL of these hold:
+#   - the callee is called as a member (`x.fold(…)`, `x?.when(…)`) inside the
+#     awaited expression (the unary operand of that `await`), at the level of
+#     the expression itself — not inside a function literal in it, whose body
+#     runs when something calls the literal (`await f.then((v) => v.fold(…))`);
+#   - its name is in SYNC_CALLBACK_NAMES and its receiver is not visibly
+#     async;
+#   - the closure is a function literal passed directly as an argument
+#     (`(l) {…}`, `(l) async {…}`, `(l) => …`, optionally `name: …`; never a
+#     generator, never a tear-off, which has no body here);
+#   - the code is before the closure's OWN first `await` (an await of a nested
+#     function literal is not the closure's own), and not inside a loop that
+#     contains one of the closure's own awaits (a second iteration runs after
+#     the suspension).
+# The closure's code after its own first await stays post-suspension, and so
+# does a closure passed to any other callee.
+
+# The exact set SocialScoreKeeper's gate #98 uses (tools/build_started_work.dart
+# `syncCallbackNames`): freezed / AsyncValue pattern matchers, the project
+# Either's fold / map, and Iterable / List / Map traversals.
+SYNC_CALLBACK_NAMES: FrozenSet[str] = frozenset({
+    'when', 'maybeWhen', 'whenOrNull', 'map', 'maybeMap', 'mapOrNull', 'whenData', 'fold', 'flatMap',
+    'mapLeft', 'getOrElse', 'forEach', 'where', 'any', 'every', 'firstWhere', 'lastWhere', 'singleWhere',
+    'firstWhereOrNull', 'lastWhereOrNull', 'expand', 'sort', 'removeWhere', 'retainWhere', 'putIfAbsent',
+    'update', 'updateAll', 'reduce', 'indexWhere', 'takeWhile', 'skipWhile', 'sortBy', 'groupBy', 'whereType',
+})
+
+_RE_SYNC_CALLEE = re.compile(
+    r'(?<!\.)\??\.\s*(' + '|'.join(sorted(SYNC_CALLBACK_NAMES, key=lambda n: (-len(n), n))) + r')\b'
+    r'\s*(?:<[^;(){}]*?>)?\s*\('
+)
+_RE_IDENTIFIER = re.compile(r'[A-Za-z_$][\w$]*')
+_RE_GENERIC_ARGS_BEFORE_CALL = re.compile(r'<[^;(){}]*?>(?=\s*\()')
+_RE_LOOP_KEYWORD = re.compile(r'(?<![\w$.])(for|while|do)\b')
+
+# An identifier that makes a receiver visibly a Future or a Stream, or the
+# AsyncNotifier whose `update` runs its callback after awaiting the state.
+_RE_ASYNC_NAME = re.compile(
+    r'^(?:Future|Stream)|(?:[Ff]uture|[Ss]tream)s?$|^watch[A-Z]|^(?:snapshots|asStream|asBroadcastStream|'
+    r'then|catchError|whenComplete|timeout|notifier)$'
+)
+_ASYNC_TYPE_DECLARATION = (
+    r'(?<![\w$.])(?:Future|FutureOr|Stream|StreamController|BehaviorSubject|ReplaySubject|PublishSubject)\b'
+    r'(?:<[^;(){}]*?>)?\??\s+'
+)
+_RECEIVER_STOP_WORDS = frozenset({
+    'await', 'return', 'new', 'const', 'in', 'else', 'case', 'throw', 'yield', 'is', 'as',
+})
+
+
+def _skip_whitespace_back(code: str, position: int, lower: int) -> int:
+    while position > lower and code[position - 1].isspace():
+        position -= 1
+    return position
+
+
+def _matching_open_back(code: str, close: int, lower: int) -> int:
+    """Index of the bracket that opens the group closed at ``close`` (``lower`` if none)."""
+    closing = code[close]
+    opening = '(' if closing == ')' else '['
+    depth = 0
+    for position in range(close, lower - 1, -1):
+        if code[position] == closing:
+            depth += 1
+        elif code[position] == opening:
+            depth -= 1
+            if depth == 0:
+                return position
+    return lower
+
+
+def _receiver_start(code: str, end: int, lower: int) -> int:
+    """Start of the member chain (``a.b(c)[d]!.e``) that ends just before ``end``.
+
+    ``lower`` bounds the scan. Stops at an operator, a separator, an opening
+    bracket of the enclosing call, or a keyword (``await x.fold`` starts at
+    ``x``).
+    """
+    start = end
+    while True:
+        cursor = _skip_whitespace_back(code, start, lower)
+        grouped = False
+        while cursor > lower and code[cursor - 1] in ')]!':
+            cursor = cursor - 1 if code[cursor - 1] == '!' else _matching_open_back(code, cursor - 1, lower)
+            cursor = _skip_whitespace_back(code, cursor, lower)
+            grouped = True
+        word_start = cursor
+        while word_start > lower and (code[word_start - 1].isalnum() or code[word_start - 1] in '_$'):
+            word_start -= 1
+        word = code[word_start:cursor]
+        if word in _RECEIVER_STOP_WORDS or (not word and not grouped):
+            return start
+        before = _skip_whitespace_back(code, word_start, lower)
+        if before > lower and code[before - 1] == '.':
+            start = before - 2 if before - 2 >= lower and code[before - 2] == '?' else before - 1
+            continue
+        return word_start
+
+
+def receiver_is_visibly_async(receiver: str, declared_in: str = '') -> bool:
+    """Whether the receiver text of a call is visibly a Future, a Stream or an AsyncNotifier.
+
+    ``receiver`` is the member chain before the call (``controller.stream.where``'s
+    ``controller.stream``). It is visibly async when any identifier in it:
+
+    - names the type or a member of one: starts with ``Future`` / ``Stream``
+      (``Future.value(x)``, ``StreamController<int>()``), ends with
+      ``future`` / ``stream`` in any case (``stream``, ``userStream``,
+      ``provider.future``), is ``watchXxx`` (a Drift / repository stream),
+      ``snapshots``, ``asStream``, ``asBroadcastStream``, or is a Future's own
+      method (``then``, ``catchError``, ``whenComplete``, ``timeout``);
+    - is ``notifier`` (``ref.read(p.notifier).update(…)``: AsyncNotifier.update
+      calls its callback after it awaits the state);
+    - or the chain starts at a name ``declared_in`` (the class's code) declares
+      with a Future / Stream type (``final Stream<int> s``, ``Future<X> s()``,
+      a parameter), or initialises from such a chain (``final s = c.stream;``).
+
+    Not decided: a receiver whose async-ness only a type checker knows — a
+    local, field or getter whose name and initialiser say nothing
+    (``final s = repo.changes();``), a result of an unrecognised call, and
+    anything reached through such a name (``s.where(p).map(f)``).
+    """
+    if any(_RE_ASYNC_NAME.search(word) for word in _RE_IDENTIFIER.findall(receiver)):
+        return True
+    head = _RE_IDENTIFIER.match(receiver.lstrip())
+    if head is None or not declared_in or head.group(0) == 'this':
+        return False
+    name = re.escape(head.group(0))
+    if re.search(_ASYNC_TYPE_DECLARATION + name + r'\b', declared_in):
+        return True
+    for initialiser in re.finditer(
+        rf'(?<![\w$.]){name}\s*=\s*(?!await\b)([^;={{}}][^;{{}}]*)', declared_in
+    ):
+        if any(_RE_ASYNC_NAME.search(word) for word in _RE_IDENTIFIER.findall(initialiser.group(1))):
+            return True
+    return False
+
+
+def _matching_bracket(code: str, start: int) -> int:
+    """Index of the ``]`` that closes the ``[`` just before ``start`` (``len(code)`` if none)."""
+    depth = 1
+    for position in range(start, len(code)):
+        if code[position] == '[':
+            depth += 1
+        elif code[position] == ']':
+            depth -= 1
+            if depth == 0:
+                return position
+    return len(code)
+
+
+def _await_operand_end(code: str, start: int) -> int:
+    """End of the unary expression an ``await`` awaits; ``start`` is just past the keyword."""
+    length = len(code)
+    position = start
+    expect_atom = True
+    while True:
+        while position < length and code[position].isspace():
+            position += 1
+        if position >= length:
+            return length
+        char = code[position]
+        if expect_atom:
+            identifier = _RE_IDENTIFIER.match(code, position)
+            if identifier:
+                position = identifier.end()
+            elif char == '(':
+                position = find_matching_paren(code, position + 1) + 1
+            elif char == '[':
+                position = _matching_bracket(code, position + 1) + 1
+            elif char == '{':
+                position = find_matching_brace(code, position + 1) + 1
+            else:
+                return position
+            expect_atom = False
+        elif char == '.' and not code.startswith('..', position):
+            position += 1
+            expect_atom = True
+        elif char == '?' and code.startswith('?.', position):
+            position += 2
+            expect_atom = True
+        elif char == '(':
+            position = find_matching_paren(code, position + 1) + 1
+        elif char == '[':
+            position = _matching_bracket(code, position + 1) + 1
+        elif char == '!' and not code.startswith('!=', position):
+            position += 1
+        elif char == '<' and (generics := _RE_GENERIC_ARGS_BEFORE_CALL.match(code, position)):
+            position = generics.end()
+        else:
+            return position
+
+
+def _function_literal_spans(code: str, start: int, end: int) -> List[Tuple[int, int]]:
+    """``(start, end)`` of every function literal whose parameter list lies in ``[start, end)``."""
+    spans: List[Tuple[int, int]] = []
+    for literal in _RE_FUNCTION_LITERAL_PARAMS.finditer(code, start, end):
+        if _RE_BLOCK_HEAD.search(code[max(0, literal.start() - 12):literal.start()]):
+            continue
+        if literal.group(0).endswith('{'):
+            body_end = find_matching_brace(code, literal.end())
+        else:
+            body_end = _arrow_body_end(code, literal.end())
+        spans.append((literal.start(), body_end))
+    return spans
+
+
+def _inside(position: int, spans: Iterable[Tuple[int, int]]) -> bool:
+    return any(begin <= position < finish for begin, finish in spans)
+
+
+def _loop_spans(code: str, start: int, end: int) -> List[Tuple[int, int]]:
+    """``(start, end)`` of every ``for`` / ``while`` / ``do`` loop starting in ``[start, end)``."""
+    spans: List[Tuple[int, int]] = []
+
+    def after_space(position: int) -> int:
+        while position < end and code[position].isspace():
+            position += 1
+        return position
+
+    for loop in _RE_LOOP_KEYWORD.finditer(code, start, end):
+        cursor = after_space(loop.end())
+        if loop.group(1) == 'do':
+            if cursor < end and code[cursor] == '{':
+                finish = find_matching_brace(code, cursor + 1) + 1
+            else:
+                finish = find_statement_end(code, cursor) + 1
+            trailer = after_space(finish)
+            if code.startswith('while', trailer):
+                head = after_space(trailer + len('while'))
+                if head < end and code[head] == '(':
+                    finish = find_matching_paren(code, head + 1) + 1
+            spans.append((loop.start(), min(finish, end)))
+            continue
+        if cursor >= end or code[cursor] != '(':
+            continue
+        cursor = after_space(find_matching_paren(code, cursor + 1) + 1)
+        if cursor < end and code[cursor] == '{':
+            finish = find_matching_brace(code, cursor + 1) + 1
+        elif cursor < end and code[cursor] == ';':
+            finish = cursor + 1
+        else:
+            finish = find_statement_end(code, cursor) + 1
+        spans.append((loop.start(), min(finish, end)))
+    return spans
+
+
+def _before_own_first_await(code: str, body_start: int, body_end: int) -> List[Tuple[int, int]]:
+    """The part of a closure body that runs before the closure first suspends."""
+    nested = _function_literal_spans(code, body_start, body_end)
+    awaits = [
+        found.start() for found in _RE_AWAIT_TOKEN.finditer(code, body_start, body_end)
+        if not _inside(found.start(), nested)
+    ]
+    spans = [(body_start, awaits[0] if awaits else body_end)]
+    for loop in _loop_spans(code, body_start, body_end):
+        if _inside(loop[0], nested) or not any(loop[0] <= a < loop[1] for a in awaits):
+            continue
+        spans = [
+            piece
+            for begin, finish in spans
+            for piece in ((begin, min(finish, loop[0])), (max(begin, loop[1]), finish))
+            if piece[0] < piece[1]
+        ]
+    return spans
+
+
+def _argument_starts(code: str, open_end: int, close: int) -> List[int]:
+    """Start of each top-level argument of the call whose ``(`` ends at ``open_end``."""
+    starts = [open_end]
+    depth = 0
+    for position in range(open_end, close):
+        char = code[position]
+        if char in '([{':
+            depth += 1
+        elif char in ')]}':
+            depth -= 1
+        elif char == ',' and depth == 0:
+            starts.append(position + 1)
+    return starts
+
+
+_RE_ARGUMENT_LABEL = re.compile(r'\s*[A-Za-z_$][\w$]*\s*:(?!:)\s*')
+
+
+def pre_suspension_spans(code: str, await_start: int, declared_in: str = '') -> List[Tuple[int, int]]:
+    """The spans of ``code`` that run before the ``await`` at ``await_start`` suspends.
+
+    ``code`` is a span the caller has reduced (comments and string text
+    blanked, which keeps positions); ``await_start`` indexes the ``await``
+    keyword in it. The result holds the code of every closure that a
+    sync-callback callee in the awaited expression runs before it returns, up
+    to the closure's own first ``await`` — see the section comment above for
+    exactly what qualifies. ``declared_in`` is the class's reduced code, where
+    a receiver's declared type is looked up (:func:`receiver_is_visibly_async`).
+    """
+    operand_start = await_start + len('await')
+    operand_end = _await_operand_end(code, operand_start)
+    literals = _function_literal_spans(code, operand_start, operand_end)
+    spans: List[Tuple[int, int]] = []
+    for callee in _RE_SYNC_CALLEE.finditer(code, operand_start, operand_end):
+        dot = callee.start()
+        if _inside(dot, literals):
+            continue
+        receiver = code[_receiver_start(code, dot, operand_start):dot]
+        if receiver_is_visibly_async(receiver, declared_in):
+            continue
+        close = find_matching_paren(code, callee.end())
+        if close >= len(code):
+            continue
+        for argument in _argument_starts(code, callee.end(), close):
+            label = _RE_ARGUMENT_LABEL.match(code, argument, close)
+            begin = label.end() if label else argument
+            while begin < close and code[begin].isspace():
+                begin += 1
+            literal = _RE_FUNCTION_LITERAL_PARAMS.match(code, begin, close)
+            if literal is None:
+                continue
+            if '*' in code[literal.start():literal.end()]:
+                continue  # a generator's body runs when it is iterated, not when it is passed
+            if literal.group(0).endswith('{'):
+                body_end = find_matching_brace(code, literal.end())
+            else:
+                body_end = _arrow_body_end(code, literal.end())
+            spans.extend(_before_own_first_await(code, literal.end(), body_end))
+    return spans
+
+
+def blank_spans(text: str, spans: Iterable[Tuple[int, int]]) -> str:
+    """``text`` with every character in ``spans`` replaced by a space (newlines kept)."""
+    blanked = list(text)
+    for begin, finish in spans:
+        for position in range(begin, min(finish, len(blanked))):
+            if blanked[position] != '\n':
+                blanked[position] = ' '
+    return ''.join(blanked)
+
+
+# =============================================================================
 # 6. Method discovery helpers
 # =============================================================================
 

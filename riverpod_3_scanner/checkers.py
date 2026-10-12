@@ -22,6 +22,8 @@ from .utils import (
     strip_comments,
     remove_comments,
     blank_string_literals,
+    blank_spans,
+    pre_suspension_spans,
     find_async_methods,
     find_methods_using_ref,
     has_significant_code_after_await,
@@ -986,6 +988,10 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
     class_start = ctx.class_start
     lines = ctx.lines
 
+    # The class's reduced code: where a receiver's declared type is looked up to
+    # tell a Future / Stream (whose callbacks run later) from a sync callee.
+    declared_in = blank_string_literals(remove_comments(class_content))
+
     for method_name in ctx.async_methods:
         # The signature head (balanced generics + parameter list) is owned by
         # utils.async_signature_head — nested generics like
@@ -1123,6 +1129,7 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
 
         # ---- VIOLATION 5: Missing ref.mounted after await ----
         await_pattern = re.compile(r'await\s+')
+        method_code = blank_string_literals(remove_comments(method_body))
         for await_match in await_pattern.finditer(method_body):
             await_line_num = method_body[:await_match.start()].count('\n')
             await_line_in_body = await_line_num
@@ -1166,9 +1173,22 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
             remaining_lines = method_lines[await_line_num + 1:await_line_num + 26]
             next_lines_str = '\n'.join(remaining_lines)
 
+            # Code the awaited expression runs BEFORE it suspends is not code
+            # "after the await": `await r.fold((f) async { build.read(p); … }, …)`
+            # calls the arm before fold returns, so the guard above the await
+            # still covers it (utils 5d). Those spans are left out of what counts
+            # as a USE; a GUARD is still found anywhere in the window.
+            pre_suspension = pre_suspension_spans(method_code, await_match.start(), declared_in)
+            use_lines_str = next_lines_str
+            if pre_suspension:
+                use_lines_str = '\n'.join(
+                    blank_spans(method_body, pre_suspension).split('\n')[await_line_num + 1:await_line_num + 26]
+                )
+
             # A guard counts only when its branch exits: `if (!ref.mounted) {
             # log(); }` falls through to the code it seems to protect.
             next_code = blank_string_literals(remove_comments(next_lines_str))
+            use_code = blank_string_literals(remove_comments(use_lines_str))
             has_mounted_after = any(
                 _guard_branch_exits(next_code, *_branch_span(next_code, guard.end()))
                 for guard in re.finditer(mounted_pattern, next_code)
@@ -1179,8 +1199,8 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
             # window IS `ref` there: significant code, covered by any exiting
             # guard. Every other use may run on a replaced Ref and needs the
             # captured Ref's OWN exiting guard in the window (utils.captured_ref_uses).
-            stale_uses, fresh_uses = captured_ref_uses(next_code, captured)
-            has_significant = bool(fresh_uses) or has_significant_code_after_await(next_lines_str)
+            stale_uses, fresh_uses = captured_ref_uses(use_code, captured)
+            has_significant = bool(fresh_uses) or has_significant_code_after_await(use_lines_str)
             unguarded_capture = None
             for name, use in stale_uses:
                 own_guard = re.compile(rf'if\s*\(\s*!{re.escape(name)}\.mounted\s*\)')
@@ -2881,6 +2901,7 @@ def check_async_event_handlers(ctx: CheckContext) -> List[Violation]:
     ref after await without checking ref.mounted.
     """
     violations: List[Violation] = []
+    declared_in = blank_string_literals(remove_comments(ctx.class_content))
 
     for handler in EVENT_HANDLERS:
         # Matches both zero-parameter (`onTap: () async {`) and parametered
@@ -2904,17 +2925,27 @@ def check_async_event_handlers(ctx: CheckContext) -> List[Violation]:
             if not await_matches:
                 continue
 
-            # Check for ref usage after any await
+            # Check for ref usage after any await. Code the awaited expression
+            # runs before it suspends (an arm `fold` / `when` calls before it
+            # returns, utils 5d) is not after that await.
             ref_usages: List[re.Match] = []
             ref_pattern = re.compile(r'\bref\.(read|watch|listen)\(')
+            callback_code = blank_string_literals(remove_comments(callback_content))
+            before_suspension = {
+                await_match.start(): pre_suspension_spans(callback_code, await_match.start(), declared_in)
+                for await_match in await_matches
+            }
+
+            def runs_after(await_match: Match[str], position: int) -> bool:
+                return position > await_match.end() and not any(
+                    begin <= position < finish for begin, finish in before_suspension[await_match.start()]
+                )
 
             for ref_match in ref_pattern.finditer(callback_content):
                 ref_pos = ref_match.start()
 
-                for await_match in await_matches:
-                    if ref_pos > await_match.end():
-                        ref_usages.append(ref_match)
-                        break
+                if any(runs_after(await_match, ref_pos) for await_match in await_matches):
+                    ref_usages.append(ref_match)
 
             if not ref_usages:
                 continue
@@ -2945,7 +2976,7 @@ def check_async_event_handlers(ctx: CheckContext) -> List[Violation]:
                 if last_mounted_check:
                     check_pos = last_mounted_check.end()
                     for await_match in await_matches:
-                        if check_pos < await_match.start() < ref_pos:
+                        if check_pos < await_match.start() < ref_pos and runs_after(await_match, ref_pos):
                             has_await_after_check = True
                             break
                 else:
