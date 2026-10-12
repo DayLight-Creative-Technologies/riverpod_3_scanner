@@ -373,6 +373,55 @@ class MyNotifier extends _$MyNotifier {
 }
 ```
 
+### Work a Build Starts: Guard on the Ref the Build Captured (v1.16.0+)
+
+Inside a Notifier `ref` is the element's **current** Ref, and a rebuild
+(`ref.invalidate(...)`, a watched dependency changing) installs a new one while
+the Notifier instance stays. `ref.mounted` after an await therefore stays `true`
+across a rebuild, so work the old build started cannot tell that it was
+replaced. A Ref captured while the build ran stays that build's: `Ref.mounted`
+is `!_element._disposed && identical(_element.ref, this)` (riverpod 3.4.3
+`ref.dart:112`, rebuild installs a new Ref at `element.dart:616-618`).
+
+```dart
+@riverpod
+class UserNotifier extends _$UserNotifier {
+  @override
+  Future<User> build() async {
+    final build = ref;                    // this build's Ref — a local, never a field
+    final cached = await _readCache(build);
+    if (!build.mounted) return User.empty;  // guard on the captured Ref
+    state = AsyncData(cached);            // past the guard, `ref` IS `build`
+    return _load(build);
+  }
+
+  Future<User> _load(Ref build) async {   // a Ref parameter, any name
+    if (!build.mounted) return User.empty;
+    final user = await _fetch();
+    if (!build.mounted) return User.empty;
+    state = AsyncData(user);
+    return user;
+  }
+}
+```
+
+The scanner accepts a mounted guard on a captured Ref wherever it accepts
+`ref.mounted`, so no redundant `if (!ref.mounted) return;` follows the build
+guard. A **captured Ref** is exactly:
+
+- a **parameter declared with type `Ref`** (any name; `Ref<T>`, `final Ref x`,
+  `required Ref x`), or
+- a **local initialised exactly from `ref`** — `final build = ref;`, `var`, or a
+  `Ref`-typed declaration.
+
+It stays one only while nothing else can be behind the name in that method: the
+name is never assigned anything but its declaring `= ref`, never the parameter
+of a nested closure, and never a parameter of another type. Not accepted: a
+local initialised from anything else (`final build = holder.ref;`), a parameter
+of another type (`BuildContext`, `WidgetRef`, `Ref?`), a field, a name another
+method declared, and a guard another `await` separates from the access (each
+`await` needs its own guard, as ever).
+
 ### Basic Template (ConsumerStatefulWidget)
 
 ```dart

@@ -22,10 +22,11 @@ from .utils import (
     find_async_methods, find_methods_using_ref,
     resolve_variable_to_class, resolve_method_calls_in_body, remove_comments,
     RE_PROVIDER_CLASS, RE_CONSUMER_STATE_CLASS, RE_METHOD, RE_REF_READ,
-    RE_MOUNTED_PROVIDER, RE_MOUNTED_WIDGET, RE_MOUNTED_ANY,
+    RE_MOUNTED_WIDGET,
     RE_METHOD_CALL, RE_CALLBACK_START, RE_AWAIT, RE_RIVERPOD_ANNOTATION,
     SKIP_METHODS, FRAMEWORK_LIFECYCLE_METHODS, ASYNC_CALLBACK_PARAMS,
-    async_signature_head,
+    async_signature_head, captured_ref_names, mounted_receivers,
+    params_of_signature,
 )
 
 
@@ -375,9 +376,6 @@ def _pass15_build_method_database(file_path: Path, ctx: AnalysisContext) -> None
             class_start = class_match.start()
             class_content = _extract_class_content(content, class_start)
 
-            # Determine mounted pattern for this class type
-            mounted_pattern = RE_MOUNTED_WIDGET if is_consumer else RE_MOUNTED_PROVIDER
-
             # Find all methods (both async and sync)
             for method_match in RE_METHOD.finditer(class_content):
                 method_name = method_match.group(1)
@@ -404,6 +402,18 @@ def _pass15_build_method_database(file_path: Path, ctx: AnalysisContext) -> None
                     if ref_read_matches:
                         first_ref_read_pos = ref_read_matches[0].start()
                         before_first_ref_read = method_body[:first_ref_read_pos]
+                        if is_consumer:
+                            mounted_pattern = RE_MOUNTED_WIDGET
+                        else:
+                            # A Notifier's guard may name a Ref the method
+                            # captured (utils 5c).
+                            receivers = mounted_receivers(captured_ref_names(
+                                params_of_signature(method_match.group(0), method_name),
+                                method_body,
+                            ))
+                            mounted_pattern = re.compile(
+                                rf'if\s*\(\s*!{receivers}\.mounted\s*\)\s*return'
+                            )
                         has_mounted_check = bool(mounted_pattern.search(before_first_ref_read))
 
                 is_lifecycle = method_name in FRAMEWORK_LIFECYCLE_METHODS
@@ -477,12 +487,21 @@ def _trace_async_method_calls(
         # Find all 'await' statements
         await_positions = [m.start() for m in RE_AWAIT.finditer(method_body)]
 
+        # The guard that ends an await's danger zone: `if (!mounted) return`, or
+        # `if (!ref.mounted) return` — on a Ref the method captured, too
+        # (utils 5c): past `if (!build.mounted) return;` the current `ref` IS
+        # that build's Ref.
+        receivers = mounted_receivers(captured_ref_names(
+            params_of_signature(async_match.group(0), method_name), method_body
+        ))
+        mounted_any = re.compile(rf'if\s*\(\s*!(?:{receivers}\.)?mounted\s*\)\s*return')
+
         # For each await, find method calls that come AFTER it
         for await_pos in await_positions:
             after_await = method_body[await_pos:]
 
             # Find next mounted check (if any)
-            mounted_check_match = RE_MOUNTED_ANY.search(after_await)
+            mounted_check_match = mounted_any.search(after_await)
 
             # Danger zone: code between await and next mounted check (or end)
             search_end = mounted_check_match.start() if mounted_check_match else len(after_await)

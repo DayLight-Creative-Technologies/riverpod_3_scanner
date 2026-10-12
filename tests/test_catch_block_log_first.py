@@ -15,12 +15,13 @@ import re
 import pytest
 
 from riverpod_3_scanner.checkers import (
-    _RE_POSITIVE_MOUNTED_CONDITION_NOTIFIER,
+    _positive_notifier_condition,
     _RE_POSITIVE_MOUNTED_CONDITION_STATE,
     _blank_mounted_guarded_regions,
     _leftmost_unguarded_danger,
 )
 from riverpod_3_scanner.scanner import RiverpodScanner
+from riverpod_3_scanner.utils import mounted_receivers
 
 # The two probes that proved the miss (SSK CAMERA-2026-001 chunk 08, round 2).
 # Probe A: multi-line log, then an UNGUARDED ref.read — the guard-window missed it.
@@ -321,7 +322,7 @@ class TestBlankMountedGuardedRegions:
     """A positive check guards a lexical region, not everything after it."""
 
     STATE = _RE_POSITIVE_MOUNTED_CONDITION_STATE
-    NOTIFIER = _RE_POSITIVE_MOUNTED_CONDITION_NOTIFIER
+    NOTIFIER = _positive_notifier_condition(mounted_receivers(()))
 
     def test_braced_block_is_blanked_and_length_and_lines_are_kept(self):
         code = "if (mounted) {\n  ref.read(p);\n}\nref.read(q);"

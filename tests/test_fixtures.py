@@ -35,6 +35,18 @@ EXPECTED = {
         ("missing_mounted_after_await", 23),
         ("ref_read_before_mounted", 40),
     ],
+    # A mounted guard on a Ref the method captured (a `Ref` parameter, a local
+    # initialised from `ref`) is a guard (v1.16.0, SSK gap #1073). The
+    # violations fixture pins the look-alikes that are not: a non-Ref parameter,
+    # a local initialised from anything else, a field, and a guard another await
+    # separates from the access.
+    "captured_ref_guard_passing.dart": [],
+    "captured_ref_guard_violations.dart": [
+        ("missing_mounted_after_await", 21),
+        ("missing_mounted_after_await", 38),
+        ("missing_mounted_after_await", 56),
+        ("missing_mounted_after_await", 75),
+    ],
     "catch_block_passing.dart": [],
     "catch_block_violations.dart": [
         ("missing_mounted_in_catch", 20),

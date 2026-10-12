@@ -11,7 +11,7 @@ inside hot-loop methods.
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from .models import MethodKey, MethodMetadata
 
@@ -117,10 +117,7 @@ RE_REF_ALL_OPERATIONS = re.compile(
 )
 
 # Mounted check patterns
-RE_MOUNTED_PROVIDER = re.compile(r'if\s*\(\s*!ref\.mounted\s*\)\s*return')
 RE_MOUNTED_WIDGET = re.compile(r'if\s*\(\s*!mounted\s*\)\s*return')
-RE_MOUNTED_ANY = re.compile(r'if\s*\(\s*!(?:ref\.)?mounted\s*\)\s*return')
-RE_MOUNTED_CHECK_PROVIDER = re.compile(r'if\s*\(\s*!ref\.mounted\s*\)')
 RE_MOUNTED_CHECK_WIDGET = re.compile(r'if\s*\(\s*!mounted\s*\)')
 RE_MOUNTED_CHECK_BROAD = re.compile(
     r'if\s*\(\s*!?\s*(ref\.)?\s*mounted\s*\)'
@@ -873,6 +870,226 @@ def first_state_access(code: str) -> Optional['re.Match[str]']:
     if interpolated is None:
         return direct
     return direct if direct.start() <= interpolated.start() else interpolated
+
+
+def split_top_level_params(param_text: str) -> List[str]:
+    """Split a parameter list's inner text into its top-level parameters.
+
+    Only ``(`` / ``)`` nesting is tracked for depth — a function-typed
+    parameter (``void Function(A a, B b) cb``) or a call in a default value
+    (``= compute(x, y)``) keeps its inner commas. The optional-parameter group
+    delimiters ``{`` ``}`` ``[`` ``]`` are deliberately NOT tracked: commas
+    inside a ``{named}`` / ``[positional]`` group DO separate parameters. A
+    collection-literal default (``= [1, 2]``) may over-split, but that only
+    yields inert fragments — a ``Ref`` / ``WidgetRef`` parameter never carries
+    an internal comma (it has no default value), so it can be neither merged
+    away nor fabricated. Group delimiters and modifiers are stripped per
+    fragment so the caller can test the bare ``Type name`` form.
+    """
+    params: List[str] = []
+    depth = 0
+    current: List[str] = []
+    for ch in param_text:
+        if ch == '(':
+            depth += 1
+            current.append(ch)
+        elif ch == ')':
+            depth = max(0, depth - 1)
+            current.append(ch)
+        elif ch == ',' and depth == 0:
+            params.append(''.join(current))
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        params.append(''.join(current))
+
+    cleaned: List[str] = []
+    for raw in params:
+        p = raw.strip().lstrip('{[').rstrip('}]').strip()
+        p = re.sub(r'^(?:required\s+|covariant\s+)+', '', p)
+        if p:
+            cleaned.append(p)
+    return cleaned
+
+
+
+# =============================================================================
+# 5c. Captured-Ref mounted guards
+# =============================================================================
+#
+# Inside a Notifier, `ref` is the element's CURRENT Ref, and a rebuild gives the
+# element a NEW one (riverpod 3.4.3 element.dart:616-618) while the Notifier
+# instance stays. A Ref captured while a build ran stays that build's, and
+# `Ref.mounted` is `!_element._disposed && identical(_element.ref, this)`
+# (ref.dart:112). So where `if (!build.mounted) return;` passes for a captured
+# `build`, the element's current Ref IS `build`, and therefore `ref.mounted` is
+# true as well: the guard on the captured Ref is a guard for `ref`, and
+# demanding the literal `ref.mounted` after it restates what the guard proved.
+#
+# What counts as a captured Ref is decided here, once, for every checker:
+#   - a PARAMETER declared with type `Ref` (any name; `Ref<T>` too, never
+#     `Ref?`, `WidgetRef` or any other type), or
+#   - a LOCAL initialised exactly from `ref` (`final build = ref;`, `var`, or a
+#     `Ref`-typed declaration),
+# and only while nothing else can be behind the name in that method: the name is
+# never assigned anything but its declaring `= ref`, never a parameter of a
+# nested function literal, and never a parameter of another type. A field, a
+# local initialised from anything else, a non-Ref parameter and a guard on
+# `other.mounted` for a receiver that is none of these stay unrecognised.
+
+_RE_REF_TYPED_PARAM = re.compile(r'^(?:final\s+)?Ref\b(?:<[^>]*>)?\s+([A-Za-z_$][\w$]*)$')
+_RE_CAPTURED_REF_LOCAL = re.compile(
+    r'(?:\b(?:final|var)\s+(?:Ref\b(?:<[^>]*>)?\s+)?|\bRef\b(?:<[^>]*>)?\s+)'
+    r'([A-Za-z_$][\w$]*)\s*=\s*ref\s*;'
+)
+_RE_FUNCTION_LITERAL_PARAMS = re.compile(r'\(([^()]*)\)\s*(?:async\*?|sync\*)?\s*(?:=>|\{)')
+_RE_CONDITION_HEAD = re.compile(r'(?<![\w$.])(?:if|while|switch)\s*$')
+
+
+def _last_word(param: str) -> Optional[str]:
+    """The declared name of one parameter: its last identifier before any default."""
+    words = re.findall(r'[A-Za-z_$][\w$]*', param.split('=')[0])
+    return words[-1] if words else None
+
+
+def captured_ref_names(param_text: str, body: str) -> FrozenSet[str]:
+    """Names, besides ``ref`` itself, that a mounted guard may name as a Notifier's Ref.
+
+    ``param_text`` is the inner text of the method's parameter list and ``body``
+    the method's body. A name qualifies when it is a ``Ref``-typed parameter or a
+    local initialised exactly from ``ref`` (see the section comment above) and is
+    never rebound: no assignment other than the declarations themselves, no
+    nested function literal with a parameter of that name, and no parameter of
+    the method with that name and another type.
+    """
+    code = blank_string_literals(remove_comments(body))
+    declarations: Dict[str, int] = {}
+    foreign_params: Set[str] = set()
+    for param in split_top_level_params(param_text):
+        typed = _RE_REF_TYPED_PARAM.match(param)
+        if typed:
+            declarations.setdefault(typed.group(1), 0)
+            continue
+        name = _last_word(param)
+        if name:
+            foreign_params.add(name)
+    for local in _RE_CAPTURED_REF_LOCAL.finditer(code):
+        declarations[local.group(1)] = declarations.get(local.group(1), 0) + 1
+
+    shadowed: Set[str] = set()
+    for params in _RE_FUNCTION_LITERAL_PARAMS.finditer(code):
+        # `if (b == x) {` / `while (b) {` / `switch (b) {` declare nothing;
+        # `for (final b in xs) {` and `catch (b) {` do.
+        if _RE_CONDITION_HEAD.search(code[max(0, params.start() - 12):params.start()]):
+            continue
+        for param in params.group(1).split(','):
+            name = _last_word(param)
+            if name:
+                shadowed.add(name)
+
+    captured = set()
+    for name, declared in declarations.items():
+        if name == 'ref' or name in foreign_params or name in shadowed:
+            continue
+        assignments = len(re.findall(
+            rf'(?<![\w$.]){re.escape(name)}\s*(?:\?\?|[-+*/%&|^]|~/|<<|>>>?)?=(?![=>])', code
+        ))
+        if assignments == declared:
+            captured.add(name)
+    return frozenset(captured)
+
+
+def mounted_receivers(names: Iterable[str]) -> str:
+    """Regex source matching the receiver of a Notifier's mounted guard.
+
+    ``ref`` always, plus each captured Ref name from :func:`captured_ref_names`:
+    ``(?:ref|build)``. A checker composes it into its own guard shape, so every
+    shape the scanner accepts for ``ref.mounted`` is accepted for a captured Ref.
+    """
+    ordered = ['ref'] + sorted(set(names) - {'ref'})
+    return '(?:' + '|'.join(re.escape(name) for name in ordered) + ')'
+
+
+def params_of_signature(signature: str, name: str) -> str:
+    """Inner text of the parameter list that follows ``name`` in ``signature``."""
+    head = re.search(rf'(?<![\w$.]){re.escape(name)}\s*\(', signature)
+    if head is None:
+        return ''
+    return signature[head.end():find_matching_paren(signature, head.end())]
+
+
+def header_param_text(header: str) -> str:
+    """Inner text of the parameter list that ends a member header, else ``''``.
+
+    ``header`` is the text from the end of the previous member to the member's
+    opening brace: annotations, return type, name, parameter list and any
+    ``async`` / ``async*`` / ``sync*`` modifier.
+    """
+    text = re.sub(r'\s*(?:async\*?|sync\*)\s*$', '', header).rstrip()
+    if not text.endswith(')'):
+        return ''
+    depth = 0
+    for k in range(len(text) - 1, -1, -1):
+        if text[k] == ')':
+            depth += 1
+        elif text[k] == '(':
+            depth -= 1
+            if depth == 0:
+                return text[k + 1:len(text) - 1]
+    return ''
+
+
+def class_member_spans(class_code: str) -> List[Tuple[int, int, int]]:
+    """``(head_start, body_open, body_close)`` of each brace-bodied member of a class.
+
+    Only members at the class's own level: a method, getter or constructor with
+    a ``{...}`` body, or a field initialised by a brace literal. Positions index
+    ``class_code``, which the caller has already reduced (comments and string
+    text blanked) so a brace in either cannot end a body early. A ``{`` inside a
+    parameter list (``{required Ref build}``) or a call is not a body.
+    """
+    spans: List[Tuple[int, int, int]] = []
+    opened = class_code.find('{')
+    if opened == -1:
+        return spans
+    head_start = opened + 1
+    parens = 0
+    i = opened + 1
+    while i < len(class_code):
+        char = class_code[i]
+        if char == '(':
+            parens += 1
+        elif char == ')':
+            parens -= 1
+        elif parens == 0:
+            if char == ';':
+                head_start = i + 1
+            elif char == '{':
+                close = find_matching_brace(class_code, i + 1)
+                spans.append((head_start, i, close))
+                i = close
+                head_start = close + 1
+            elif char == '}':
+                break
+        i += 1
+    return spans
+
+
+def captured_ref_names_at(class_code: str, position: int) -> FrozenSet[str]:
+    """Captured Ref names visible at ``position`` of a (reduced) class body.
+
+    Resolved against the class member that contains ``position``: its own
+    parameters and locals. Another member's capture is not visible here, and a
+    position outside every member (a field initialiser's call) sees none.
+    """
+    for head_start, body_open, body_close in class_member_spans(class_code):
+        if body_open < position < body_close:
+            return captured_ref_names(
+                header_param_text(class_code[head_start:body_open]),
+                class_code[body_open + 1:body_close],
+            )
+    return frozenset()
 
 
 # =============================================================================

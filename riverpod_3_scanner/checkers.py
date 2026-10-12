@@ -27,6 +27,11 @@ from .utils import (
     has_significant_code_after_await,
     first_state_access,
     async_signature_head,
+    split_top_level_params,
+    params_of_signature,
+    captured_ref_names,
+    captured_ref_names_at,
+    mounted_receivers,
     FUTURE_TYPE_PATTERN,
     PARAM_LIST_PATTERN,
     infer_type_from_provider,
@@ -38,7 +43,6 @@ from .utils import (
     RE_STATE_INTERPOLATION,
     RE_MOUNTED_CHECK_BROAD,
     RE_MOUNTED_CHECK_WIDGET,
-    RE_MOUNTED_CHECK_PROVIDER,
     RE_REF_FIELD_STORAGE,
     RE_ANY_CLASS_DECL,
     RE_STREAM_FN_PROVIDER_HEAD,
@@ -868,8 +872,14 @@ _CATCH_DANGER_PATTERNS = (
 # `if (ref.mounted)` on a notifier, optionally `&& more` — as opposed to the
 # early-return guard `if (!mounted) return;`.
 _RE_POSITIVE_MOUNTED_CONDITION_STATE = re.compile(r'\s*mounted\s*(?:&&.*)?', re.DOTALL)
-_RE_POSITIVE_MOUNTED_CONDITION_NOTIFIER = re.compile(r'\s*ref\.mounted\s*(?:&&.*)?', re.DOTALL)
 _RE_IF_OPEN = re.compile(r'\bif\s*\(')
+
+
+def _positive_notifier_condition(receivers: str) -> Pattern[str]:
+    """The condition of a POSITIVE Notifier mounted check: ``ref.mounted``, or the
+    same on a captured Ref (``receivers`` from :func:`mounted_receivers`),
+    optionally ``&& more``."""
+    return re.compile(rf'\s*{receivers}\.mounted\s*(?:&&.*)?', re.DOTALL)
 
 
 def _blank_mounted_guarded_regions(code: str, condition: Pattern[str]) -> str:
@@ -921,18 +931,6 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
     class_start = ctx.class_start
     lines = ctx.lines
 
-    # Determine mounted pattern
-    if ctx.is_consumer_state:
-        mounted_pattern = r'if\s*\(\s*!mounted\s*\)'
-    else:
-        mounted_pattern = r'if\s*\(\s*!ref\.mounted\s*\)'
-    mounted_re = re.compile(mounted_pattern)
-    positive_mounted_condition = (
-        _RE_POSITIVE_MOUNTED_CONDITION_STATE
-        if ctx.is_consumer_state
-        else _RE_POSITIVE_MOUNTED_CONDITION_NOTIFIER
-    )
-
     for method_name in ctx.async_methods:
         # The signature head (balanced generics + parameter list) is owned by
         # utils.async_signature_head — nested generics like
@@ -950,6 +948,22 @@ def check_async_method_safety(ctx: CheckContext) -> List[Violation]:
         method_end = find_matching_brace(class_content, method_start)
         method_body = class_content[method_start:method_end]
         method_lines = method_body.split('\n')
+
+        # The mounted guard this method may use. A ConsumerState guards with
+        # `mounted`. A Notifier guards with `ref.mounted` — or with the same
+        # guard on a Ref this method captured (a `Ref` parameter, a local
+        # initialised from `ref`): past `if (!build.mounted) return;` the
+        # Notifier's current `ref` IS that build's Ref (utils 5c).
+        if ctx.is_consumer_state:
+            mounted_pattern = r'if\s*\(\s*!mounted\s*\)'
+            positive_mounted_condition = _RE_POSITIVE_MOUNTED_CONDITION_STATE
+        else:
+            receivers = mounted_receivers(captured_ref_names(
+                params_of_signature(method_match.group(0), method_name), method_body
+            ))
+            mounted_pattern = rf'if\s*\(\s*!{receivers}\.mounted\s*\)'
+            positive_mounted_condition = _positive_notifier_condition(receivers)
+        mounted_re = re.compile(mounted_pattern)
 
         # ---- VIOLATION 4: ref/state operation before mounted check ----
         first_10_lines = '\n'.join(method_lines[:10])
@@ -1173,13 +1187,8 @@ def _find_sync_methods_with_ref_operations(
     """
     results: List[Tuple[str, int, str]] = []
 
-    if is_consumer_state:
-        mounted_pattern = r'if\s*\(\s*!mounted\s*\)\s*return'
-    else:
-        mounted_pattern = r'if\s*\(\s*!ref\.mounted\s*\)\s*return'
-
     method_pattern = re.compile(
-        r'(?:void|bool|String|int|double|num|\w+\?)\s+(\w+)\s*\([^)]*\)\s*\{',
+        r'(?:void|bool|String|int|double|num|\w+\?)\s+(\w+)\s*\(([^)]*)\)\s*\{',
         re.DOTALL,
     )
 
@@ -1188,6 +1197,13 @@ def _find_sync_methods_with_ref_operations(
         method_start = method_match.end()
         method_end = find_matching_brace(class_content, method_start)
         method_body = class_content[method_start:method_end]
+
+        # A Notifier's guard may name a Ref the method captured (utils 5c).
+        if is_consumer_state:
+            mounted_pattern = r'if\s*\(\s*!mounted\s*\)\s*return'
+        else:
+            receivers = mounted_receivers(captured_ref_names(method_match.group(2), method_body))
+            mounted_pattern = rf'if\s*\(\s*!{receivers}\.mounted\s*\)\s*return'
 
         # Skip framework lifecycle methods
         if method_name in FRAMEWORK_LIFECYCLE_METHODS:
@@ -3299,47 +3315,6 @@ Reference: https://github.com/DayLight-Creative-Technologies/riverpod_3_scanner/
 _RE_REF_PARAM_TYPE = re.compile(r'^(Ref|WidgetRef)\b(?:<[^>]*>)?\??\s+\w+')
 
 
-def _split_top_level_params(param_text: str) -> List[str]:
-    """Split a parameter list's inner text into its top-level parameters.
-
-    Only ``(`` / ``)`` nesting is tracked for depth — a function-typed
-    parameter (``void Function(A a, B b) cb``) or a call in a default value
-    (``= compute(x, y)``) keeps its inner commas. The optional-parameter group
-    delimiters ``{`` ``}`` ``[`` ``]`` are deliberately NOT tracked: commas
-    inside a ``{named}`` / ``[positional]`` group DO separate parameters. A
-    collection-literal default (``= [1, 2]``) may over-split, but that only
-    yields inert fragments — a ``Ref`` / ``WidgetRef`` parameter never carries
-    an internal comma (it has no default value), so it can be neither merged
-    away nor fabricated. Group delimiters and modifiers are stripped per
-    fragment so the caller can test the bare ``Type name`` form.
-    """
-    params: List[str] = []
-    depth = 0
-    current: List[str] = []
-    for ch in param_text:
-        if ch == '(':
-            depth += 1
-            current.append(ch)
-        elif ch == ')':
-            depth = max(0, depth - 1)
-            current.append(ch)
-        elif ch == ',' and depth == 0:
-            params.append(''.join(current))
-            current = []
-        else:
-            current.append(ch)
-    if current:
-        params.append(''.join(current))
-
-    cleaned: List[str] = []
-    for raw in params:
-        p = raw.strip().lstrip('{[').rstrip('}]').strip()
-        p = re.sub(r'^(?:required\s+|covariant\s+)+', '', p)
-        if p:
-            cleaned.append(p)
-    return cleaned
-
-
 def _ref_in_plain_class_fix(
     class_name: str,
     ref_type: str,
@@ -3536,7 +3511,7 @@ def check_ref_into_plain_class(
             if not after or after[0] not in '{;:=':
                 continue  # not a constructor declaration
             param_text = stripped_body[paren_open:paren_close]
-            for param in _split_top_level_params(param_text):
+            for param in split_top_level_params(param_text):
                 type_match = _RE_REF_PARAM_TYPE.match(param)
                 if not type_match:
                     continue
@@ -3669,7 +3644,12 @@ def check_async_star_function_providers(
 
         # An `if (!ref.mounted)` guard occurring before that operation makes
         # it safe (same guard-before-operation logic as check_async_method_safety).
-        guard_match = RE_MOUNTED_CHECK_PROVIDER.search(body)
+        # A guard on a Ref the body captured (`final build = ref;`) is the same
+        # guard (utils 5c), as is one on any `Ref`-typed parameter.
+        receivers = mounted_receivers(captured_ref_names(
+            stripped[paren_open:paren_close], body
+        ))
+        guard_match = re.compile(rf'if\s*\(\s*!{receivers}\.mounted\s*\)').search(body)
         if guard_match and guard_match.start() < op_match.start():
             continue
 
@@ -4172,7 +4152,10 @@ def check_catch_guard_returns_success(
 # CHECKER 17: check_notifier_ui_callbacks (VIOLATION 15b)
 # ===========================================================================
 
-_RE_NOTIFIER_MOUNTED_GUARD = re.compile(r'if\s*\(\s*!\s*ref\s*\.\s*mounted\b')
+def _notifier_mounted_guard(receivers: str) -> Pattern[str]:
+    """The early-return guard of a Notifier: ``if (!ref.mounted``, or the same on a
+    captured Ref (``receivers`` from :func:`mounted_receivers`)."""
+    return re.compile(rf'if\s*\(\s*!\s*{receivers}\s*\.\s*mounted\b')
 
 
 def check_notifier_ui_callbacks(ctx: CheckContext) -> List[Violation]:
@@ -4195,8 +4178,14 @@ def check_notifier_ui_callbacks(ctx: CheckContext) -> List[Violation]:
         for match in pattern.finditer(code):
             body_open = match.end()
             body_close = find_matching_brace(code, body_open)
-            body = _blank_mounted_guarded_regions(code[body_open:body_close], _RE_POSITIVE_MOUNTED_CONDITION_NOTIFIER)
-            danger = _leftmost_unguarded_danger(body, _CATCH_DANGER_PATTERNS, _RE_NOTIFIER_MOUNTED_GUARD)
+            # The closure sees the Refs its enclosing member captured (utils 5c).
+            receivers = mounted_receivers(captured_ref_names_at(code, match.start()))
+            body = _blank_mounted_guarded_regions(
+                code[body_open:body_close], _positive_notifier_condition(receivers)
+            )
+            danger = _leftmost_unguarded_danger(
+                body, _CATCH_DANGER_PATTERNS, _notifier_mounted_guard(receivers)
+            )
             if danger is None:
                 continue
             abs_line = ctx.full_content[:ctx.class_start + match.start()].count('\n') + 1

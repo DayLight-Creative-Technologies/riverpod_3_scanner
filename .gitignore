@@ -13,6 +13,14 @@ eggs/
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Virtualenvs — the test suite needs pytest PLUS an editable install of this
+# package (pipx/global pytest cannot import riverpod_3_scanner, so collection
+# fails). Standard setup:
+#   python3 -m venv .venv && .venv/bin/python -m pip install pytest -e .
+#   .venv/bin/python -m pytest tests/ -q
+.venv/
+venv/
+
 # Environment and credentials
 .env
 .env.*
